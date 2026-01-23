@@ -688,7 +688,8 @@ func (a *App) GetCurrentMode() string {
 
 // NewACPClient creates a new ACP client
 func NewACPClient(ctx context.Context, cwd string, mcpServers []any) (*ACPClient, error) {
-	cmd := exec.CommandContext(ctx, "claude-code-acp")
+	// cmd := exec.CommandContext(ctx, "claude-code-acp")
+	cmd := exec.CommandContext(ctx, "/Users/danrousseau/Programming/ai-agents/acp-glm/acp-glm")
 	cmd.Env = append(os.Environ(), "ANTHROPIC_API_KEY="+os.Getenv("ANTHROPIC_API_KEY"))
 	cmd.Dir = cwd
 

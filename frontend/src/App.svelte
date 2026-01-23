@@ -15,6 +15,7 @@
   let sessions: SessionInfo[] = [];
   let activeSessionId = '';
   let sessionStates = new Map<string, SessionState>();
+  let subscribedSessions = new Set<string>();
   let unsubscribeFns: (() => void)[] = [];
 
   // Current session's reactive state (bound to active session)
@@ -22,7 +23,6 @@
   let inputText = '';
   let messagesContainer: HTMLDivElement;
   let textarea: HTMLTextAreaElement;
-  let messageId = 0;
   let isLoading = false;
   let currentChunk = '';
   let currentThought = '';
@@ -68,37 +68,60 @@
   function loadSessionState(id: string) {
     const state = getOrCreateSessionState(id);
     ({ messages, fileChanges, reviewComments, planEntries, currentModeId, currentChunk, currentThought, availableModes, isLoading } = state);
-    messageId = messages.length > 0 ? Math.max(...messages.map(m => m.id)) : 0;
   }
 
   function subscribeToSession(sessionId: string) {
-    unsubscribeFns.forEach(fn => fn());
-    const on = (e: string, cb: (...args: any[]) => void) => unsubscribeFns.push(EventsOn(`session:${sessionId}:${e}`, cb));
-    unsubscribeFns = [];
+    if (subscribedSessions.has(sessionId)) return;
+    subscribedSessions.add(sessionId);
 
-    on('chat_chunk', (t: string) => currentChunk += t);
-    on('chat_thought', (t: string) => currentThought += t);
-    on('tool_state', (state: ToolCall) => {
-      const idx = messages.findIndex(m => m.toolState?.id === state.id);
-      if (idx >= 0) { messages[idx].toolState = state; messages = messages; }
-      else messages = [...messages, { id: ++messageId, text: '', sender: 'tool', toolState: state }];
+    const state = getOrCreateSessionState(sessionId);
+    const on = (e: string, cb: (...args: any[]) => void) => unsubscribeFns.push(EventsOn(`session:${sessionId}:${e}`, cb));
+
+    // Helper to sync reactive vars if this is active session
+    const syncIfActive = () => {
+      if (sessionId === activeSessionId) loadSessionState(sessionId);
+    };
+
+    on('chat_chunk', (t: string) => {
+      state.currentChunk += t;
+      syncIfActive();
+    });
+    on('chat_thought', (t: string) => {
+      state.currentThought += t;
+      syncIfActive();
+    });
+    on('tool_state', (toolState: ToolCall) => {
+      const idx = state.messages.findIndex(m => m.toolState?.id === toolState.id);
+      if (idx >= 0) { state.messages[idx].toolState = toolState; }
+      else {
+        const newId = state.messages.length > 0 ? Math.max(...state.messages.map(m => m.id)) + 1 : 1;
+        state.messages.push({ id: newId, text: '', sender: 'tool', toolState });
+      }
+      syncIfActive();
     });
     on('prompt_complete', () => {
-      if (currentChunk) { messages = [...messages, { id: ++messageId, text: currentChunk, sender: 'bot' }]; currentChunk = ''; }
-      currentThought = '';
-      isLoading = false;
+      if (state.currentChunk) {
+        const newId = state.messages.length > 0 ? Math.max(...state.messages.map(m => m.id)) + 1 : 1;
+        state.messages.push({ id: newId, text: state.currentChunk, sender: 'bot' });
+        state.currentChunk = '';
+      }
+      state.currentThought = '';
+      state.isLoading = false;
+      syncIfActive();
     });
     on('error', (err: string) => {
-      messages = [...messages, { id: ++messageId, text: `Error: ${err}`, sender: 'bot' }];
-      isLoading = false;
+      const newId = state.messages.length > 0 ? Math.max(...state.messages.map(m => m.id)) + 1 : 1;
+      state.messages.push({ id: newId, text: `Error: ${err}`, sender: 'bot' });
+      state.isLoading = false;
+      syncIfActive();
     });
-    on('file_changes_updated', (changes: FileChange[]) => fileChanges = changes);
+    on('file_changes_updated', (changes: FileChange[]) => { state.fileChanges = changes; syncIfActive(); });
     on('review_agent_chunk', (t: string) => reviewAgentOutput += t);
     on('review_agent_running', () => { reviewAgentRunning = true; reviewAgentOutput = ''; });
     on('review_agent_complete', () => { reviewAgentRunning = false; reviewComments = []; });
-    on('modes_available', (modes: SessionMode[]) => availableModes = modes);
-    on('mode_changed', (modeId: string) => currentModeId = modeId);
-    on('plan_update', (entries: PlanEntry[]) => planEntries = entries);
+    on('modes_available', (modes: SessionMode[]) => { state.availableModes = modes; syncIfActive(); });
+    on('mode_changed', (modeId: string) => { state.currentModeId = modeId; syncIfActive(); });
+    on('plan_update', (entries: PlanEntry[]) => { state.planEntries = entries; syncIfActive(); });
   }
 
   function handleSessionChange(newSessionId: string) {
@@ -189,12 +212,19 @@
 
   function sendMessage() {
     const text = inputText.trim();
-    if (!text || isLoading) return;
-    if (currentChunk) { messages = [...messages, { id: ++messageId, text: currentChunk, sender: 'bot' }]; currentChunk = ''; }
-    messages = [...messages, { id: ++messageId, text, sender: 'user' }];
+    if (!text || isLoading || !activeSessionId) return;
+    const state = getOrCreateSessionState(activeSessionId);
+    if (state.currentChunk) {
+      const newId = state.messages.length > 0 ? Math.max(...state.messages.map(m => m.id)) + 1 : 1;
+      state.messages.push({ id: newId, text: state.currentChunk, sender: 'bot' });
+      state.currentChunk = '';
+    }
+    const msgId = state.messages.length > 0 ? Math.max(...state.messages.map(m => m.id)) + 1 : 1;
+    state.messages.push({ id: msgId, text, sender: 'user' });
+    state.isLoading = true;
+    loadSessionState(activeSessionId);
     EventsEmit('send_message', text);
     inputText = '';
-    isLoading = true;
     if (textarea) textarea.style.height = 'auto';
   }
 
