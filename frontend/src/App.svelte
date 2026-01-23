@@ -68,6 +68,15 @@
   let currentChunk = '';
   let currentThought = '';
 
+  // User question modal state
+  interface UserQuestion {
+    requestId: string;
+    question: string;
+    options?: { label: string; description?: string }[];
+  }
+  let userQuestion: UserQuestion | null = null;
+  let userAnswerInput = '';
+
   // Subagent collapse state
   let expandedSubagents: Set<string> = new Set();
 
@@ -179,6 +188,12 @@
       isLoading = false;
     });
 
+    EventsOn('user_question', (q: UserQuestion) => {
+      console.log('User question:', q);
+      userQuestion = q;
+      userAnswerInput = '';
+    });
+
     console.log('Event listeners registered');
   });
 
@@ -218,6 +233,15 @@
   function cancelRequest() {
     EventsEmit('cancel');
     isLoading = false;
+  }
+
+  function submitUserAnswer(answer?: string) {
+    if (!userQuestion) return;
+    const finalAnswer = answer || userAnswerInput.trim();
+    if (!finalAnswer) return;
+    EventsEmit('user_answer', { requestId: userQuestion.requestId, answer: finalAnswer });
+    userQuestion = null;
+    userAnswerInput = '';
   }
 
   function getToolStatusIcon(status: string): string {
@@ -504,6 +528,58 @@
       </div>
     {/if}
   </div>
+
+  <!-- User Question Modal -->
+  {#if userQuestion}
+    <div class="absolute inset-0 bg-ink-dark/50 flex items-center justify-center z-50">
+      <div class="bg-parchment-glow border border-ink-muted/30 rounded-2xl shadow-2xl max-w-lg w-full mx-6 overflow-hidden animate-fade-rise">
+        <div class="px-8 py-6 border-b border-ink-muted/15">
+          <h2 class="font-editorial text-xl text-ink-deep">Question from Assistant</h2>
+        </div>
+        <div class="px-8 py-6">
+          <p class="text-ink-dark text-[15px] leading-relaxed mb-6">{userQuestion.question}</p>
+
+          {#if userQuestion.options?.length}
+            <div class="space-y-2 mb-6">
+              {#each userQuestion.options as opt}
+                <button
+                  on:click={() => submitUserAnswer(opt.label)}
+                  class="w-full px-5 py-3 text-left rounded-lg border border-ink-muted/20
+                         bg-parchment-base/60 hover:bg-parchment-dark/40 transition-colors"
+                >
+                  <span class="text-ink-dark font-medium text-sm">{opt.label}</span>
+                  {#if opt.description}
+                    <p class="text-ink-muted text-xs mt-1">{opt.description}</p>
+                  {/if}
+                </button>
+              {/each}
+            </div>
+          {/if}
+
+          <textarea
+            bind:value={userAnswerInput}
+            placeholder="Type your response..."
+            rows="3"
+            class="w-full px-4 py-3 bg-parchment-base/60 border border-ink-muted/20 rounded-lg
+                   text-ink-deep text-[15px] placeholder-ink-muted/50 resize-none leading-normal
+                   focus:outline-none focus:border-accent-copper/40 focus:bg-parchment-glow
+                   transition-all duration-300"
+          ></textarea>
+        </div>
+        <div class="px-8 py-4 border-t border-ink-muted/15 bg-parchment-base/40 flex justify-end gap-3">
+          <button
+            on:click={() => submitUserAnswer()}
+            disabled={!userAnswerInput.trim()}
+            class="px-6 py-2 bg-accent-copper text-parchment-glow font-medium rounded-lg text-sm
+                   hover:bg-accent-rust transition-all duration-200
+                   disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            Submit
+          </button>
+        </div>
+      </div>
+    </div>
+  {/if}
 
   <!-- Input -->
   <div class="px-8 py-4 border-t border-ink-muted/15 bg-parchment-glow/80">

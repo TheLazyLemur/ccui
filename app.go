@@ -56,8 +56,9 @@ type PromptContent struct {
 }
 
 type SessionPromptParams struct {
-	SessionID string          `json:"sessionId"`
-	Prompt    []PromptContent `json:"prompt"`
+	SessionID    string          `json:"sessionId"`
+	Prompt       []PromptContent `json:"prompt"`
+	AllowedTools []string        `json:"allowedTools,omitempty"`
 }
 
 type SessionPromptResult struct {
@@ -254,8 +255,10 @@ type ACPClient struct {
 
 // App struct
 type App struct {
-	ctx    context.Context
-	client *ACPClient
+	ctx          context.Context
+	client       *ACPClient
+	mcpServer    *UserQuestionServer
+	mcpServerURL string
 }
 
 func NewApp() *App {
@@ -265,9 +268,20 @@ func NewApp() *App {
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
 
+	// Start MCP server for AskUserQuestion
+	a.mcpServer = NewUserQuestionServer(ctx)
+	url, err := a.mcpServer.Start()
+	if err != nil {
+		slog.Error("failed to start MCP server", "error", err)
+	} else {
+		a.mcpServerURL = url
+		slog.Info("MCP server started", "url", url)
+	}
+
 	// Listen for frontend events
 	runtime.EventsOn(ctx, "send_message", a.handleSendMessage)
 	runtime.EventsOn(ctx, "permission_response", a.handlePermissionResponse)
+	runtime.EventsOn(ctx, "user_answer", a.handleUserAnswer)
 	runtime.EventsOn(ctx, "cancel", a.handleCancel)
 }
 
@@ -284,7 +298,14 @@ func (a *App) handleSendMessage(data ...interface{}) {
 		// Initialize client if needed
 		if a.client == nil {
 			cwd, _ := os.Getwd()
-			client, err := NewACPClient(a.ctx, cwd)
+			// Build MCP servers config
+			var mcpServers []any
+			if a.mcpServerURL != "" {
+				mcpServers = MCPServerConfig(a.mcpServerURL)
+			} else {
+				mcpServers = []any{}
+			}
+			client, err := NewACPClient(a.ctx, cwd, mcpServers)
 			if err != nil {
 				slog.Error("failed to create ACP client", "error", err)
 				runtime.EventsEmit(a.ctx, "error", err.Error())
@@ -296,8 +317,11 @@ func (a *App) handleSendMessage(data ...interface{}) {
 			go a.listenForUpdates()
 		}
 
-		// Send prompt
-		result, err := a.client.SendPrompt(input)
+		// Send prompt with auto-allowed MCP tools
+		allowedTools := []string{
+			"mcp__ccui__ccui_ask_user_question", // Auto-allow our ask user question tool
+		}
+		result, err := a.client.SendPrompt(input, allowedTools)
 		if err != nil {
 			slog.Error("prompt failed", "error", err)
 			runtime.EventsEmit(a.ctx, "error", err.Error())
@@ -323,6 +347,23 @@ func (a *App) handlePermissionResponse(data ...interface{}) {
 	a.client.permissionRespCh <- optionID
 }
 
+func (a *App) handleUserAnswer(data ...interface{}) {
+	if a.mcpServer == nil || len(data) == 0 {
+		return
+	}
+	// Expect {requestId, answer} map
+	answerMap, ok := data[0].(map[string]interface{})
+	if !ok {
+		return
+	}
+	requestID, _ := answerMap["requestId"].(string)
+	answer, _ := answerMap["answer"].(string)
+	a.mcpServer.HandleUserAnswer(UserAnswer{
+		RequestID: requestID,
+		Answer:    answer,
+	})
+}
+
 func (a *App) handleCancel(data ...interface{}) {
 	if a.client != nil {
 		a.client.Cancel()
@@ -330,13 +371,16 @@ func (a *App) handleCancel(data ...interface{}) {
 }
 
 func (a *App) shutdown(ctx context.Context) {
+	if a.mcpServer != nil {
+		a.mcpServer.Stop()
+	}
 	if a.client != nil {
 		a.client.Close()
 	}
 }
 
 // NewACPClient creates a new ACP client
-func NewACPClient(ctx context.Context, cwd string) (*ACPClient, error) {
+func NewACPClient(ctx context.Context, cwd string, mcpServers []any) (*ACPClient, error) {
 	cmd := exec.CommandContext(ctx, "claude-code-acp")
 	cmd.Env = append(os.Environ(), "ANTHROPIC_API_KEY="+os.Getenv("ANTHROPIC_API_KEY"))
 	cmd.Dir = cwd
@@ -381,7 +425,7 @@ func NewACPClient(ctx context.Context, cwd string) (*ACPClient, error) {
 		return nil, fmt.Errorf("initialize: %w", err)
 	}
 
-	if err := c.newSession(cwd); err != nil {
+	if err := c.newSession(cwd, mcpServers); err != nil {
 		cmd.Process.Kill()
 		return nil, fmt.Errorf("new session: %w", err)
 	}
@@ -445,6 +489,12 @@ func (c *ACPClient) handleMethod(msg JSONRPCMessage) {
 		var req PermissionRequest
 		json.Unmarshal(msg.Params, &req)
 		c.logEvent("permission_request", req)
+
+		// Auto-allow our MCP ask user question tool
+		if req.ToolCall.Title == "mcp__ccui__ccui_ask_user_question" {
+			c.sendPermissionResponse(msg.ID, "allow_always")
+			return
+		}
 
 		// Update tool state with permission options
 		state := c.toolManager.Update(req.ToolCall.ToolCallID, func(s *ToolState) {
@@ -615,10 +665,10 @@ func (c *ACPClient) initialize() error {
 	return err
 }
 
-func (c *ACPClient) newSession(cwd string) error {
+func (c *ACPClient) newSession(cwd string, mcpServers []any) error {
 	resp, err := c.send("session/new", map[string]any{
 		"cwd":        cwd,
-		"mcpServers": []any{},
+		"mcpServers": mcpServers,
 	})
 	if err != nil {
 		return err
@@ -630,10 +680,11 @@ func (c *ACPClient) newSession(cwd string) error {
 	return nil
 }
 
-func (c *ACPClient) SendPrompt(text string) (SessionPromptResult, error) {
+func (c *ACPClient) SendPrompt(text string, allowedTools []string) (SessionPromptResult, error) {
 	resp, err := c.send("session/prompt", SessionPromptParams{
-		SessionID: c.sessionID,
-		Prompt:    []PromptContent{{Type: "text", Text: text}},
+		SessionID:    c.sessionID,
+		Prompt:       []PromptContent{{Type: "text", Text: text}},
+		AllowedTools: allowedTools,
 	})
 	if err != nil {
 		return SessionPromptResult{}, err
