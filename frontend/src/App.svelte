@@ -101,7 +101,7 @@
     EventsOn('file_changes_updated', (changes: FileChange[]) => { fileChanges = changes; });
     EventsOn('review_agent_chunk', (t: string) => { reviewAgentOutput += t; });
     EventsOn('review_agent_running', () => { reviewAgentRunning = true; reviewAgentOutput = ''; });
-    EventsOn('review_agent_complete', () => { reviewAgentRunning = false; reviewComments = []; });
+    EventsOn('review_agent_complete', () => { console.log('review_agent_complete received'); reviewAgentRunning = false; reviewComments = []; });
   });
 
   afterUpdate(() => { if (messagesContainer) messagesContainer.scrollTop = messagesContainer.scrollHeight; });

@@ -25,6 +25,7 @@
     "vite": "^3.0.7"
   },
   "dependencies": {
+    "diff": "^8.0.3",
     "marked": "^17.0.1"
   }
 }

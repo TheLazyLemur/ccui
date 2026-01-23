@@ -217,6 +217,12 @@ func (s *FileChangeStore) RecordChange(filePath, originalContent, currentContent
 	}
 }
 
+func (s *FileChangeStore) Get(filePath string) *FileChange {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.changes[filePath]
+}
+
 func (s *FileChangeStore) GetAll() []FileChange {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -305,6 +311,11 @@ type ACPClient struct {
 	// Permission handling
 	permissionRespCh chan string
 	permissionMsg    *JSONRPCMessage
+
+	// Event name config
+	chunkEventName     string // defaults to "chat_chunk"
+	autoPermission     bool   // auto-allow all permissions (for review agent)
+	suppressToolEvents bool   // don't emit tool_state events (for review agent)
 }
 
 // App struct
@@ -523,6 +534,29 @@ func NewACPClient(ctx context.Context, cwd string, mcpServers []any) (*ACPClient
 	return c, nil
 }
 
+// ACPClientConfig for customizing ACPClient behavior
+type ACPClientConfig struct {
+	CWD                string
+	MCPServers         []any
+	ChunkEventName     string // defaults to "chat_chunk"
+	AutoPermission     bool   // auto-allow all permissions
+	SuppressToolEvents bool   // don't emit tool_state events
+}
+
+// NewACPClientWithConfig creates a new ACP client with custom config
+func NewACPClientWithConfig(ctx context.Context, cfg ACPClientConfig) (*ACPClient, error) {
+	client, err := NewACPClient(ctx, cfg.CWD, cfg.MCPServers)
+	if err != nil {
+		return nil, err
+	}
+	if cfg.ChunkEventName != "" {
+		client.chunkEventName = cfg.ChunkEventName
+	}
+	client.autoPermission = cfg.AutoPermission
+	client.suppressToolEvents = cfg.SuppressToolEvents
+	return client, nil
+}
+
 func (c *ACPClient) logEvent(eventType string, data any) {
 	if c.logFile == nil {
 		return
@@ -537,7 +571,17 @@ func (c *ACPClient) logEvent(eventType string, data any) {
 	}
 }
 
+func (c *ACPClient) closeAllCallbacks() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for id, ch := range c.callbacks {
+		close(ch)
+		delete(c.callbacks, id)
+	}
+}
+
 func (c *ACPClient) readLoop() {
+	defer c.closeAllCallbacks()
 	for c.stdout.Scan() {
 		line := c.stdout.Bytes()
 		if len(line) == 0 || line[0] != '{' {
@@ -586,6 +630,12 @@ func (c *ACPClient) handleMethod(msg JSONRPCMessage) {
 			return
 		}
 
+		// Auto-allow all permissions for review agent
+		if c.autoPermission {
+			c.sendPermissionResponse(msg.ID, "allow_always")
+			return
+		}
+
 		// Update tool state with permission options
 		state := c.toolManager.Update(req.ToolCall.ToolCallID, func(s *ToolState) {
 			s.Status = "awaiting_permission"
@@ -615,13 +665,22 @@ func (c *ACPClient) handleSessionUpdate(update SessionUpdate) {
 		if len(u.Content) > 0 {
 			json.Unmarshal(u.Content, &content)
 		}
+		eventName := c.chunkEventName
+		if eventName == "" {
+			eventName = "chat_chunk"
+		}
 		if u.SessionUpdate == "agent_message_chunk" {
-			runtime.EventsEmit(c.ctx, "chat_chunk", content.Text)
+			runtime.EventsEmit(c.ctx, eventName, content.Text)
 		} else {
 			runtime.EventsEmit(c.ctx, "chat_thought", content.Text)
 		}
 
 	case "tool_call":
+		// Skip tool_state events for review agent
+		if c.suppressToolEvents {
+			return
+		}
+
 		// Check if we already have this tool (tool_call events can come multiple times)
 		existing := c.toolManager.Get(u.ToolCallID)
 		if existing != nil {
@@ -671,6 +730,30 @@ func (c *ACPClient) handleSessionUpdate(update SessionUpdate) {
 		runtime.EventsEmit(c.ctx, "tool_state", state)
 
 	case "tool_call_update":
+		// For suppressed tool events, only track file changes
+		if c.suppressToolEvents {
+			if u.Meta != nil && u.Meta.ClaudeCode != nil && u.Meta.ClaudeCode.ToolResponse != nil {
+				tr := u.Meta.ClaudeCode.ToolResponse
+				toolName := ""
+				if u.Meta.ClaudeCode.ToolName != "" {
+					toolName = u.Meta.ClaudeCode.ToolName
+				}
+				if tr.FilePath != "" && (toolName == "Edit" || toolName == "Write") {
+					currentContent := tr.Content
+					if toolName == "Edit" && tr.Content == "" {
+						base := tr.OriginalFile
+						if existing := c.fileChangeStore.Get(tr.FilePath); existing != nil {
+							base = existing.CurrentContent
+						}
+						currentContent = strings.Replace(base, tr.OldString, tr.NewString, 1)
+					}
+					c.fileChangeStore.RecordChange(tr.FilePath, tr.OriginalFile, currentContent, tr.StructuredPatch)
+					runtime.EventsEmit(c.ctx, "file_changes_updated", c.fileChangeStore.GetAll())
+				}
+			}
+			return
+		}
+
 		// Update existing tool state
 		state := c.toolManager.Update(u.ToolCallID, func(s *ToolState) {
 			s.Status = u.Status
@@ -693,7 +776,16 @@ func (c *ACPClient) handleSessionUpdate(update SessionUpdate) {
 
 				// Track file changes for review
 				if tr.FilePath != "" && (s.ToolName == "Edit" || s.ToolName == "Write") {
-					c.fileChangeStore.RecordChange(tr.FilePath, tr.OriginalFile, tr.Content, tr.StructuredPatch)
+					currentContent := tr.Content
+					if s.ToolName == "Edit" && tr.Content == "" {
+						// Edit tool: compute current from original + edit
+						base := tr.OriginalFile
+						if existing := c.fileChangeStore.Get(tr.FilePath); existing != nil {
+							base = existing.CurrentContent
+						}
+						currentContent = strings.Replace(base, tr.OldString, tr.NewString, 1)
+					}
+					c.fileChangeStore.RecordChange(tr.FilePath, tr.OriginalFile, currentContent, tr.StructuredPatch)
 					runtime.EventsEmit(c.ctx, "file_changes_updated", c.fileChangeStore.GetAll())
 				}
 			}
@@ -731,7 +823,10 @@ func (c *ACPClient) send(method string, params any) (JSONRPCMessage, error) {
 		return JSONRPCMessage{}, err
 	}
 
-	resp := <-ch
+	resp, ok := <-ch
+	if !ok {
+		return JSONRPCMessage{}, fmt.Errorf("connection closed")
+	}
 	if resp.Error != nil {
 		return resp, fmt.Errorf("rpc error %d: %s", resp.Error.Code, resp.Error.Message)
 	}
@@ -869,120 +964,35 @@ func (a *App) SubmitReview(comments []ReviewComment) {
 		}
 		prompt.WriteString("\nPlease address this feedback by making the necessary changes.")
 
-		// Spawn fresh subprocess
+		// Create fresh ACPClient for review agent
 		cwd, _ := os.Getwd()
-		cmd := exec.CommandContext(a.ctx, "claude-code-acp")
-		cmd.Env = append(os.Environ(), "ANTHROPIC_API_KEY="+os.Getenv("ANTHROPIC_API_KEY"))
-		cmd.Dir = cwd
-
-		stdin, err := cmd.StdinPipe()
+		reviewClient, err := NewACPClientWithConfig(a.ctx, ACPClientConfig{
+			CWD:                cwd,
+			MCPServers:         []any{},
+			ChunkEventName:     "review_agent_chunk",
+			AutoPermission:     true,
+			SuppressToolEvents: true,
+		})
 		if err != nil {
 			runtime.EventsEmit(a.ctx, "review_agent_chunk", "Error: "+err.Error())
 			runtime.EventsEmit(a.ctx, "review_agent_complete", nil)
 			return
 		}
-		stdout, err := cmd.StdoutPipe()
+
+		// Share fileChangeStore with main client so review changes are tracked
+		reviewClient.fileChangeStore = a.client.fileChangeStore
+
+		// SendPrompt blocks until complete (callback-based)
+		_, err = reviewClient.SendPrompt(prompt.String(), []string{})
+
 		if err != nil {
-			runtime.EventsEmit(a.ctx, "review_agent_chunk", "Error: "+err.Error())
-			runtime.EventsEmit(a.ctx, "review_agent_complete", nil)
-			return
-		}
-		cmd.Stderr = os.Stderr
-
-		if err := cmd.Start(); err != nil {
-			runtime.EventsEmit(a.ctx, "review_agent_chunk", "Error: "+err.Error())
-			runtime.EventsEmit(a.ctx, "review_agent_complete", nil)
-			return
+			runtime.EventsEmit(a.ctx, "review_agent_chunk", "\nError: "+err.Error())
 		}
 
-		scanner := bufio.NewScanner(stdout)
-		done := make(chan struct{})
-
-		// Read loop for review agent
-		go func() {
-			defer close(done)
-			var sessionID string
-			msgID := 0
-
-			// Initialize
-			msgID++
-			initMsg := JSONRPCMessage{JSONRPC: "2.0", ID: &msgID, Method: "initialize"}
-			initMsg.Params, _ = json.Marshal(InitializeParams{ProtocolVersion: 1, ClientCapabilities: ClientCapabilities{}})
-			data, _ := json.Marshal(initMsg)
-			stdin.Write(append(data, '\n'))
-
-			// Read init response
-			for scanner.Scan() {
-				var msg JSONRPCMessage
-				if json.Unmarshal(scanner.Bytes(), &msg) == nil && msg.ID != nil && *msg.ID == msgID {
-					break
-				}
-			}
-
-			// New session
-			msgID++
-			newSessMsg := JSONRPCMessage{JSONRPC: "2.0", ID: &msgID, Method: "session/new"}
-			newSessMsg.Params, _ = json.Marshal(map[string]any{"cwd": cwd, "mcpServers": []any{}})
-			data, _ = json.Marshal(newSessMsg)
-			stdin.Write(append(data, '\n'))
-
-			// Read session response
-			for scanner.Scan() {
-				var msg JSONRPCMessage
-				if json.Unmarshal(scanner.Bytes(), &msg) == nil && msg.ID != nil && *msg.ID == msgID {
-					var result SessionNewResult
-					json.Unmarshal(msg.Result, &result)
-					sessionID = result.SessionID
-					break
-				}
-			}
-
-			// Send prompt
-			msgID++
-			promptMsg := JSONRPCMessage{JSONRPC: "2.0", ID: &msgID, Method: "session/prompt"}
-			promptMsg.Params, _ = json.Marshal(SessionPromptParams{SessionID: sessionID, Prompt: []PromptContent{{Type: "text", Text: prompt.String()}}})
-			data, _ = json.Marshal(promptMsg)
-			stdin.Write(append(data, '\n'))
-
-			// Stream updates
-			for scanner.Scan() {
-				line := scanner.Bytes()
-				var msg JSONRPCMessage
-				if json.Unmarshal(line, &msg) != nil {
-					continue
-				}
-
-				if msg.Method == "session/update" {
-					var update SessionUpdate
-					json.Unmarshal(msg.Params, &update)
-					if update.Update.SessionUpdate == "agent_message_chunk" {
-						var content TextContent
-						json.Unmarshal(update.Update.Content, &content)
-						runtime.EventsEmit(a.ctx, "review_agent_chunk", content.Text)
-					}
-				} else if msg.ID != nil && *msg.ID == msgID {
-					// Prompt complete
-					break
-				} else if msg.Method == "session/request_permission" {
-					// Auto-allow for review agent
-					var req PermissionRequest
-					json.Unmarshal(msg.Params, &req)
-					resp := JSONRPCMessage{JSONRPC: "2.0", ID: msg.ID}
-					result, _ := json.Marshal(PermissionResponse{Outcome: PermissionOutcome{Outcome: "selected", OptionID: "allow_always"}})
-					resp.Result = result
-					data, _ := json.Marshal(resp)
-					stdin.Write(append(data, '\n'))
-				}
-			}
-		}()
-
-		<-done
-		stdin.Close()
-		cmd.Wait()
-
-		// Clear file changes after review
-		a.client.fileChangeStore.Clear()
-		runtime.EventsEmit(a.ctx, "file_changes_updated", []FileChange{})
+		// Emit complete BEFORE Close() which may block on cmd.Wait()
 		runtime.EventsEmit(a.ctx, "review_agent_complete", nil)
+
+		// Close in background to avoid blocking
+		go reviewClient.Close()
 	}()
 }

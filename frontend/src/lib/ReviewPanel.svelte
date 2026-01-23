@@ -56,13 +56,13 @@
     generalComment = '';
   }
 
-  function getFileComments(filePath: string): ReviewComment[] {
-    return comments.filter(c => c.filePath === filePath);
-  }
+  // Reactive comment maps for proper Svelte reactivity
+  $: commentsByFile = comments.reduce((acc, c) => {
+    if (c.filePath) (acc[c.filePath] ||= []).push(c);
+    return acc;
+  }, {} as Record<string, ReviewComment[]>);
 
-  function getGeneralComments(): ReviewComment[] {
-    return comments.filter(c => c.type === 'general');
-  }
+  $: generalComments = comments.filter(c => c.type === 'general');
 </script>
 
 <div class="h-full flex flex-col overflow-hidden">
@@ -77,7 +77,7 @@
       {#each fileChanges as fc}
         <ReviewDiff
           fileChange={fc}
-          comments={getFileComments(fc.filePath)}
+          comments={commentsByFile[fc.filePath] || []}
           on:addComment={(e) => handleAddComment(e, fc.filePath)}
           on:removeComment={(e) => dispatch('removeComment', e.detail)}
         />
@@ -85,7 +85,7 @@
     {/if}
 
     <!-- General comments -->
-    {#each getGeneralComments() as comment}
+    {#each generalComments as comment}
       <div class="px-4 py-3 border border-ink-faint bg-paper-dim flex items-start gap-2">
         <span class="text-xs text-ink-muted">General:</span>
         <span class="text-ink-medium text-sm flex-1">{comment.text}</span>
