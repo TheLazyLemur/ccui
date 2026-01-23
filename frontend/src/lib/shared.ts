@@ -49,6 +49,18 @@ export interface ReviewComment {
   text: string;
 }
 
+export interface SessionMode {
+  id: string;
+  name: string;
+  description?: string;
+}
+
+export interface PlanEntry {
+  content: string;
+  priority: 'high' | 'medium' | 'low';
+  status: 'pending' | 'in_progress' | 'completed';
+}
+
 const STATUS_INDICATORS: Record<string, string> = {
   pending: '○', awaiting_permission: '◇', running: '◎', completed: '●', error: '✕'
 };
@@ -60,6 +72,12 @@ const STATUS_CLASSES: Record<string, string> = {
 
 export const getStatusIndicator = (status: string): string => STATUS_INDICATORS[status] || '○';
 export const getStatusClass = (status: string): string => STATUS_CLASSES[status] || 'text-ink-muted';
+
+const PLAN_STATUS_INDICATORS: Record<string, string> = {
+  pending: '○', in_progress: '◎', completed: '●'
+};
+
+export const getPlanStatusIndicator = (status: string): string => PLAN_STATUS_INDICATORS[status] || '○';
 
 export function getButtonClass(kind: string): string {
   if (kind.startsWith('allow')) return 'border-accent-success text-accent-success hover:bg-accent-success/10';

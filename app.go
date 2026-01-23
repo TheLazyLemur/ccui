@@ -47,8 +47,14 @@ type FSCapabilities struct {
 	WriteTextFile bool `json:"writeTextFile"`
 }
 
+type ModesInfo struct {
+	CurrentModeID  string        `json:"currentModeId"`
+	AvailableModes []SessionMode `json:"availableModes"`
+}
+
 type SessionNewResult struct {
-	SessionID string `json:"sessionId"`
+	SessionID string     `json:"sessionId"`
+	Modes     *ModesInfo `json:"modes,omitempty"`
 }
 
 type PromptContent struct {
@@ -83,6 +89,10 @@ type UpdateContent struct {
 	Output        []OutputBlock   `json:"output,omitempty"`
 	RawInput      map[string]any  `json:"rawInput,omitempty"`
 	Meta          *MetaContent    `json:"_meta,omitempty"`
+	// Mode updates
+	ModeID string `json:"modeId,omitempty"`
+	// Plan updates
+	Entries []PlanEntry `json:"entries,omitempty"`
 }
 
 type MetaContent struct {
@@ -157,6 +167,20 @@ type PermissionResponse struct {
 type PermissionOutcome struct {
 	Outcome  string `json:"outcome"`
 	OptionID string `json:"optionId,omitempty"`
+}
+
+// Session modes
+type SessionMode struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+}
+
+// Plan entries
+type PlanEntry struct {
+	Content  string `json:"content"`
+	Priority string `json:"priority"` // high, medium, low
+	Status   string `json:"status"`   // pending, in_progress, completed
 }
 
 // ToolState tracks unified state for a single tool call
@@ -316,6 +340,10 @@ type ACPClient struct {
 	chunkEventName     string // defaults to "chat_chunk"
 	autoPermission     bool   // auto-allow all permissions (for review agent)
 	suppressToolEvents bool   // don't emit tool_state events (for review agent)
+
+	// Session modes
+	currentModeID  string
+	availableModes []SessionMode
 }
 
 // App struct
@@ -343,6 +371,32 @@ func (a *App) startup(ctx context.Context) {
 		slog.Info("MCP server started", "url", url)
 	}
 
+	// Create ACP client on startup to get modes immediately
+	go func() {
+		cwd, _ := os.Getwd()
+		var mcpServers []any
+		if a.mcpServerURL != "" {
+			mcpServers = MCPServerConfig(a.mcpServerURL)
+		} else {
+			mcpServers = []any{}
+		}
+		client, err := NewACPClient(ctx, cwd, mcpServers)
+		if err != nil {
+			slog.Error("failed to create ACP client", "error", err)
+			return
+		}
+		a.client = client
+
+		// Emit modes to frontend
+		if len(client.availableModes) > 0 {
+			runtime.EventsEmit(ctx, "modes_available", client.availableModes)
+			runtime.EventsEmit(ctx, "mode_changed", client.currentModeID)
+		}
+
+		// Start update listener
+		go a.listenForUpdates()
+	}()
+
 	// Listen for frontend events
 	runtime.EventsOn(ctx, "send_message", a.handleSendMessage)
 	runtime.EventsOn(ctx, "permission_response", a.handlePermissionResponse)
@@ -361,26 +415,9 @@ func (a *App) handleSendMessage(data ...interface{}) {
 	}
 
 	go func() {
-		// Initialize client if needed
 		if a.client == nil {
-			cwd, _ := os.Getwd()
-			// Build MCP servers config
-			var mcpServers []any
-			if a.mcpServerURL != "" {
-				mcpServers = MCPServerConfig(a.mcpServerURL)
-			} else {
-				mcpServers = []any{}
-			}
-			client, err := NewACPClient(a.ctx, cwd, mcpServers)
-			if err != nil {
-				slog.Error("failed to create ACP client", "error", err)
-				runtime.EventsEmit(a.ctx, "error", err.Error())
-				return
-			}
-			a.client = client
-
-			// Start update listener
-			go a.listenForUpdates()
+			runtime.EventsEmit(a.ctx, "error", "Client not ready, please wait...")
+			return
 		}
 
 		// Send prompt with auto-allowed MCP tools
@@ -477,6 +514,30 @@ func (a *App) shutdown(ctx context.Context) {
 	if a.client != nil {
 		a.client.Close()
 	}
+}
+
+// SetMode changes the agent's session mode
+func (a *App) SetMode(modeID string) error {
+	if a.client == nil {
+		return fmt.Errorf("no active session")
+	}
+	return a.client.SetMode(modeID)
+}
+
+// GetModes returns available session modes
+func (a *App) GetModes() []SessionMode {
+	if a.client == nil {
+		return nil
+	}
+	return a.client.availableModes
+}
+
+// GetCurrentMode returns the current mode ID
+func (a *App) GetCurrentMode() string {
+	if a.client == nil {
+		return ""
+	}
+	return a.client.currentModeID
 }
 
 // NewACPClient creates a new ACP client
@@ -797,6 +858,13 @@ func (c *ACPClient) handleSessionUpdate(update SessionUpdate) {
 			}
 			runtime.EventsEmit(c.ctx, "tool_state", state)
 		}
+
+	case "current_mode_update":
+		c.currentModeID = u.ModeID
+		runtime.EventsEmit(c.ctx, "mode_changed", u.ModeID)
+
+	case "plan":
+		runtime.EventsEmit(c.ctx, "plan_update", u.Entries)
 	}
 }
 
@@ -868,6 +936,10 @@ func (c *ACPClient) newSession(cwd string, mcpServers []any) error {
 	var result SessionNewResult
 	json.Unmarshal(resp.Result, &result)
 	c.sessionID = result.SessionID
+	if result.Modes != nil {
+		c.currentModeID = result.Modes.CurrentModeID
+		c.availableModes = result.Modes.AvailableModes
+	}
 	return nil
 }
 
@@ -883,6 +955,18 @@ func (c *ACPClient) SendPrompt(text string, allowedTools []string) (SessionPromp
 	var result SessionPromptResult
 	json.Unmarshal(resp.Result, &result)
 	return result, nil
+}
+
+func (c *ACPClient) SetMode(modeID string) error {
+	_, err := c.send("session/set_mode", map[string]string{
+		"sessionId": c.sessionID,
+		"modeId":    modeID,
+	})
+	if err == nil {
+		c.currentModeID = modeID
+		runtime.EventsEmit(c.ctx, "mode_changed", modeID)
+	}
+	return err
 }
 
 func (c *ACPClient) sendPermissionResponse(id *int, optionID string) {

@@ -5,7 +5,9 @@
   import ToolCard from './lib/ToolCard.svelte';
   import TabBar from './lib/TabBar.svelte';
   import ReviewPanel from './lib/ReviewPanel.svelte';
-  import { type Message, type ToolCall, type UserQuestion, type FileChange, type ReviewComment, getStatusIndicator, getStatusClass } from './lib/shared';
+  import ModeSelector from './lib/ModeSelector.svelte';
+  import PlanPanel from './lib/PlanPanel.svelte';
+  import { type Message, type ToolCall, type UserQuestion, type FileChange, type ReviewComment, type SessionMode, type PlanEntry, getStatusIndicator, getStatusClass } from './lib/shared';
 
   let messages: Message[] = [];
   let inputText = '';
@@ -25,6 +27,11 @@
   let reviewComments: ReviewComment[] = [];
   let reviewAgentOutput = '';
   let reviewAgentRunning = false;
+
+  // Session modes & plan
+  let availableModes: SessionMode[] = [];
+  let currentModeId = '';
+  let planEntries: PlanEntry[] = [];
 
   // Theme & font
   let isDark = false;
@@ -102,6 +109,11 @@
     EventsOn('review_agent_chunk', (t: string) => { reviewAgentOutput += t; });
     EventsOn('review_agent_running', () => { reviewAgentRunning = true; reviewAgentOutput = ''; });
     EventsOn('review_agent_complete', () => { console.log('review_agent_complete received'); reviewAgentRunning = false; reviewComments = []; });
+
+    // Session mode events
+    EventsOn('modes_available', (modes: SessionMode[]) => { availableModes = modes; });
+    EventsOn('mode_changed', (modeId: string) => { currentModeId = modeId; });
+    EventsOn('plan_update', (entries: PlanEntry[]) => { planEntries = entries; });
   });
 
   afterUpdate(() => { if (messagesContainer) messagesContainer.scrollTop = messagesContainer.scrollHeight; });
@@ -147,10 +159,11 @@
 <div class="h-full bg-paper paper-texture" style="zoom: {fontScale}">
   <div class="h-full flex flex-col max-w-4xl mx-auto">
     <!-- Header -->
-    <header class="px-6 py-4 flex justify-between items-center border-b border-ink-faint relative z-10">
+    <header class="px-6 py-4 flex justify-between items-center border-b border-ink-faint relative z-20">
       <div class="flex items-center gap-4">
         <h1 class="text-lg font-medium tracking-tight text-ink">ccui</h1>
         <TabBar {activeTab} changeCount={fileChanges.length} on:tabChange={(e) => activeTab = e.detail} />
+        <ModeSelector modes={availableModes} {currentModeId} />
       </div>
       <div class="flex items-center gap-4">
         {#if isLoading}
@@ -166,6 +179,7 @@
     {#if activeTab === 'chat'}
     <!-- Messages -->
     <div bind:this={messagesContainer} class="flex-1 overflow-y-auto px-6 py-6 space-y-5 relative z-10">
+      <PlanPanel entries={planEntries} />
       {#each messages as msg, i (msg.id)}
         {#if msg.sender === 'tool' && msg.toolState && !msg.toolState.parentId}
           {@const tool = msg.toolState}

@@ -22,6 +22,22 @@ export namespace main {
 	        this.text = source["text"];
 	    }
 	}
+	export class SessionMode {
+	    id: string;
+	    name: string;
+	    description?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new SessionMode(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.name = source["name"];
+	        this.description = source["description"];
+	    }
+	}
 
 }
 
