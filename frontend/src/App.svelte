@@ -3,33 +3,7 @@
   import { EventsOn, EventsEmit } from '../wailsjs/runtime/runtime';
   import { marked } from 'marked';
   import ToolCard from './lib/ToolCard.svelte';
-
-  interface Message {
-    id: number;
-    text: string;
-    sender: 'user' | 'bot' | 'tool';
-    toolState?: ToolCall;
-  }
-
-  interface ToolCall {
-    id: string;
-    title: string;
-    kind: string;
-    status: string;
-    toolName?: string;
-    parentId?: string;
-    input?: Record<string, unknown>;
-    output?: unknown[];
-    diffs?: { type: string; path?: string; oldText?: string; newText?: string }[];
-    diff?: { filePath?: string; structuredPatch?: unknown[]; content?: string };
-    permissionOptions?: { optionId: string; name: string; kind: string }[];
-  }
-
-  interface UserQuestion {
-    requestId: string;
-    question: string;
-    options?: { label: string; description?: string }[];
-  }
+  import { type Message, type ToolCall, type UserQuestion, getStatusIndicator, getStatusClass } from './lib/shared';
 
   let messages: Message[] = [];
   let inputText = '';
@@ -141,16 +115,6 @@
     userAnswerInput = '';
   }
 
-  function getStatusIndicator(status: string): string {
-    return { pending: '○', awaiting_permission: '◇', running: '◎', completed: '●', error: '✕' }[status] || '○';
-  }
-
-  function getStatusClass(status: string): string {
-    return {
-      pending: 'text-ink-muted', awaiting_permission: 'text-accent-warning',
-      running: 'text-ink-medium', completed: 'text-accent-success', error: 'text-accent-danger'
-    }[status] || 'text-ink-muted';
-  }
 </script>
 
 <div class="h-full bg-paper paper-texture" style="zoom: {fontScale}">

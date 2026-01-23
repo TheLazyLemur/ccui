@@ -1,11 +1,5 @@
 <script lang="ts">
-  interface PatchHunk {
-    oldStart: number;
-    oldLines: number;
-    newStart: number;
-    newLines: number;
-    lines: string[];
-  }
+  import type { PatchHunk } from './shared';
 
   export let filePath: string = '';
   export let structuredPatch: PatchHunk[] | undefined = undefined;

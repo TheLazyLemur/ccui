@@ -1,74 +1,12 @@
 <script lang="ts">
   import DiffView from './DiffView.svelte';
   import { createEventDispatcher } from 'svelte';
-
-  interface PatchHunk {
-    oldStart: number;
-    oldLines: number;
-    newStart: number;
-    newLines: number;
-    lines: string[];
-  }
-
-  interface DiffBlock {
-    type: string;
-    path?: string;
-    oldText?: string;
-    newText?: string;
-  }
-
-  interface DiffInfo {
-    filePath?: string;
-    structuredPatch?: PatchHunk[];
-    content?: string;
-  }
-
-  interface PermissionOption {
-    optionId: string;
-    name: string;
-    kind: string;
-  }
-
-  interface ToolCall {
-    id: string;
-    title: string;
-    kind: string;
-    status: string;
-    toolName?: string;
-    input?: Record<string, unknown>;
-    diff?: DiffInfo;
-    diffs?: DiffBlock[];
-    permissionOptions?: PermissionOption[];
-  }
+  import { type ToolCall, getStatusIndicator, getStatusClass, getButtonClass } from './shared';
 
   export let tool: ToolCall;
   export let compact: boolean = false;
 
   const dispatch = createEventDispatcher();
-
-  function getStatusIndicator(status: string): string {
-    const indicators: Record<string, string> = {
-      pending: '○', awaiting_permission: '◇', running: '◎', completed: '●', error: '✕'
-    };
-    return indicators[status] || '○';
-  }
-
-  function getStatusClass(status: string): string {
-    const classes: Record<string, string> = {
-      pending: 'text-ink-muted',
-      awaiting_permission: 'text-accent-warning',
-      running: 'text-ink-medium',
-      completed: 'text-accent-success',
-      error: 'text-accent-danger'
-    };
-    return classes[status] || 'text-ink-muted';
-  }
-
-  function getButtonClass(kind: string): string {
-    if (kind.startsWith('allow')) return 'border-accent-success text-accent-success hover:bg-accent-success/10';
-    if (kind.startsWith('reject')) return 'border-accent-danger text-accent-danger hover:bg-accent-danger/10';
-    return 'border-ink-faint text-ink-medium hover:bg-paper-dim';
-  }
 
   $: isEdit = tool.toolName === 'Edit' && tool.status === 'awaiting_permission';
   $: isWrite = tool.toolName === 'Write';

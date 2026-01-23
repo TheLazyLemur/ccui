@@ -154,11 +154,6 @@ body {
   animation: spin-slow 1.5s linear infinite;
 }
 
-/* Typography */
-.font-body {
-  font-family: 'Literata', Georgia, serif;
-}
-
 .font-mono {
   font-family: 'JetBrains Mono', 'Menlo', monospace;
 }
@@ -254,7 +249,3 @@ body {
   text-decoration-thickness: 2px;
 }
 
-/* Theme transition classes - applied selectively */
-.theme-transition {
-  transition: background-color 0.2s ease, border-color 0.2s ease, color 0.2s ease;
-}
