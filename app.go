@@ -337,6 +337,7 @@ type ACPClient struct {
 	permissionMsg    *JSONRPCMessage
 
 	// Event name config
+	eventPrefix        string // e.g. "session:abc123:"
 	chunkEventName     string // defaults to "chat_chunk"
 	autoPermission     bool   // auto-allow all permissions (for review agent)
 	suppressToolEvents bool   // don't emit tool_state events (for review agent)
@@ -346,16 +347,36 @@ type ACPClient struct {
 	availableModes []SessionMode
 }
 
+// SessionInfo for frontend
+type SessionInfo struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	CreatedAt string `json:"createdAt"`
+	ModeID    string `json:"modeId"`
+}
+
+// SessionState holds per-session data
+type SessionState struct {
+	ID        string
+	Name      string
+	CreatedAt time.Time
+	Client    *ACPClient
+}
+
 // App struct
 type App struct {
-	ctx          context.Context
-	client       *ACPClient
-	mcpServer    *UserQuestionServer
-	mcpServerURL string
+	ctx             context.Context
+	mcpServer       *UserQuestionServer
+	mcpServerURL    string
+	sessions        map[string]*SessionState
+	activeSessionID string
+	sessionMu       sync.RWMutex
 }
 
 func NewApp() *App {
-	return &App{}
+	return &App{
+		sessions: make(map[string]*SessionState),
+	}
 }
 
 func (a *App) startup(ctx context.Context) {
@@ -371,32 +392,6 @@ func (a *App) startup(ctx context.Context) {
 		slog.Info("MCP server started", "url", url)
 	}
 
-	// Create ACP client on startup to get modes immediately
-	go func() {
-		cwd, _ := os.Getwd()
-		var mcpServers []any
-		if a.mcpServerURL != "" {
-			mcpServers = MCPServerConfig(a.mcpServerURL)
-		} else {
-			mcpServers = []any{}
-		}
-		client, err := NewACPClient(ctx, cwd, mcpServers)
-		if err != nil {
-			slog.Error("failed to create ACP client", "error", err)
-			return
-		}
-		a.client = client
-
-		// Emit modes to frontend
-		if len(client.availableModes) > 0 {
-			runtime.EventsEmit(ctx, "modes_available", client.availableModes)
-			runtime.EventsEmit(ctx, "mode_changed", client.currentModeID)
-		}
-
-		// Start update listener
-		go a.listenForUpdates()
-	}()
-
 	// Listen for frontend events
 	runtime.EventsOn(ctx, "send_message", a.handleSendMessage)
 	runtime.EventsOn(ctx, "permission_response", a.handlePermissionResponse)
@@ -405,18 +400,151 @@ func (a *App) startup(ctx context.Context) {
 	runtime.EventsOn(ctx, "submit_review", a.handleSubmitReview)
 }
 
-func (a *App) handleSendMessage(data ...interface{}) {
-	if len(data) == 0 {
-		return
+// CreateSession creates a new session with the given name
+func (a *App) CreateSession(name string) (string, error) {
+	cwd, _ := os.Getwd()
+	mcpServers := a.getMCPServers()
+	sessionID := fmt.Sprintf("session-%d", time.Now().UnixNano())
+	eventPrefix := fmt.Sprintf("session:%s:", sessionID)
+
+	client, err := NewACPClientWithConfig(a.ctx, ACPClientConfig{
+		CWD:         cwd,
+		MCPServers:  mcpServers,
+		EventPrefix: eventPrefix,
+	})
+	if err != nil {
+		return "", fmt.Errorf("create ACP client: %w", err)
 	}
-	input, ok := data[0].(string)
+
+	state := &SessionState{
+		ID:        sessionID,
+		Name:      name,
+		CreatedAt: time.Now(),
+		Client:    client,
+	}
+
+	a.sessionMu.Lock()
+	a.sessions[sessionID] = state
+	a.activeSessionID = sessionID
+	a.sessionMu.Unlock()
+
+	// Emit session events
+	runtime.EventsEmit(a.ctx, "sessions_updated", a.GetSessions())
+	runtime.EventsEmit(a.ctx, "active_session_changed", sessionID)
+
+	// Emit modes for this session
+	if len(client.availableModes) > 0 {
+		runtime.EventsEmit(a.ctx, eventPrefix+"modes_available", client.availableModes)
+		runtime.EventsEmit(a.ctx, eventPrefix+"mode_changed", client.currentModeID)
+	}
+
+	return sessionID, nil
+}
+
+// SwitchSession switches to an existing session
+func (a *App) SwitchSession(sessionID string) error {
+	a.sessionMu.Lock()
+	defer a.sessionMu.Unlock()
+
+	if a.sessions[sessionID] == nil {
+		return fmt.Errorf("session not found: %s", sessionID)
+	}
+	a.activeSessionID = sessionID
+	runtime.EventsEmit(a.ctx, "active_session_changed", sessionID)
+	return nil
+}
+
+// CloseSession closes and removes a session
+func (a *App) CloseSession(sessionID string) error {
+	a.sessionMu.Lock()
+	defer a.sessionMu.Unlock()
+
+	state := a.sessions[sessionID]
+	if state == nil {
+		return fmt.Errorf("session not found: %s", sessionID)
+	}
+
+	if state.Client != nil {
+		go state.Client.Close()
+	}
+	delete(a.sessions, sessionID)
+
+	// Switch to another session if closing active
+	if a.activeSessionID == sessionID {
+		a.activeSessionID = a.pickNextSession()
+	}
+
+	runtime.EventsEmit(a.ctx, "sessions_updated", a.getSessionsLocked())
+	runtime.EventsEmit(a.ctx, "active_session_changed", a.activeSessionID)
+	return nil
+}
+
+// pickNextSession returns any remaining session ID or empty
+func (a *App) pickNextSession() string {
+	for id := range a.sessions {
+		return id
+	}
+	return ""
+}
+
+// GetSessions returns info for all sessions
+func (a *App) GetSessions() []SessionInfo {
+	a.sessionMu.RLock()
+	defer a.sessionMu.RUnlock()
+	return a.getSessionsLocked()
+}
+
+func (a *App) getSessionsLocked() []SessionInfo {
+	result := make([]SessionInfo, 0, len(a.sessions))
+	for _, s := range a.sessions {
+		info := SessionInfo{
+			ID:        s.ID,
+			Name:      s.Name,
+			CreatedAt: s.CreatedAt.Format(time.RFC3339),
+		}
+		if s.Client != nil {
+			info.ModeID = s.Client.currentModeID
+		}
+		result = append(result, info)
+	}
+	return result
+}
+
+// GetActiveSession returns the active session ID
+func (a *App) GetActiveSession() string {
+	a.sessionMu.RLock()
+	defer a.sessionMu.RUnlock()
+	return a.activeSessionID
+}
+
+// getActiveClient returns the active session's client
+func (a *App) getActiveClient() *ACPClient {
+	a.sessionMu.RLock()
+	defer a.sessionMu.RUnlock()
+	if state := a.sessions[a.activeSessionID]; state != nil {
+		return state.Client
+	}
+	return nil
+}
+
+// getMCPServers returns MCP server config or empty slice
+func (a *App) getMCPServers() []any {
+	if a.mcpServerURL != "" {
+		return MCPServerConfig(a.mcpServerURL)
+	}
+	return []any{}
+}
+
+func (a *App) handleSendMessage(data ...interface{}) {
+	input, ok := firstAs[string](data)
 	if !ok {
 		return
 	}
 
 	go func() {
-		if a.client == nil {
-			runtime.EventsEmit(a.ctx, "error", "Client not ready, please wait...")
+		client := a.getActiveClient()
+		if client == nil {
+			runtime.EventsEmit(a.ctx, "error", "No active session")
 			return
 		}
 
@@ -424,120 +552,138 @@ func (a *App) handleSendMessage(data ...interface{}) {
 		allowedTools := []string{
 			"mcp__ccui__ccui_ask_user_question", // Auto-allow our ask user question tool
 		}
-		result, err := a.client.SendPrompt(input, allowedTools)
+		result, err := client.SendPrompt(input, allowedTools)
 		if err != nil {
 			slog.Error("prompt failed", "error", err)
-			runtime.EventsEmit(a.ctx, "error", err.Error())
+			runtime.EventsEmit(a.ctx, client.eventPrefix+"error", err.Error())
 			return
 		}
 
-		runtime.EventsEmit(a.ctx, "prompt_complete", result.StopReason)
+		runtime.EventsEmit(a.ctx, client.eventPrefix+"prompt_complete", result.StopReason)
 	}()
 }
 
-func (a *App) listenForUpdates() {
-	<-a.ctx.Done()
-}
-
 func (a *App) handlePermissionResponse(data ...interface{}) {
-	if a.client == nil || len(data) == 0 {
-		return
-	}
-	optionID, ok := data[0].(string)
+	optionID, ok := firstAs[string](data)
 	if !ok {
 		return
 	}
-	a.client.permissionRespCh <- optionID
+	if client := a.getActiveClient(); client != nil {
+		client.permissionRespCh <- optionID
+	}
+}
+
+// firstAs extracts and casts first element from variadic data
+func firstAs[T any](data []interface{}) (T, bool) {
+	var zero T
+	if len(data) == 0 {
+		return zero, false
+	}
+	v, ok := data[0].(T)
+	return v, ok
 }
 
 func (a *App) handleUserAnswer(data ...interface{}) {
-	if a.mcpServer == nil || len(data) == 0 {
+	if a.mcpServer == nil {
 		return
 	}
-	// Expect {requestId, answer} map
-	answerMap, ok := data[0].(map[string]interface{})
+	answerMap, ok := firstAs[map[string]interface{}](data)
 	if !ok {
 		return
 	}
-	requestID, _ := answerMap["requestId"].(string)
-	answer, _ := answerMap["answer"].(string)
 	a.mcpServer.HandleUserAnswer(UserAnswer{
-		RequestID: requestID,
-		Answer:    answer,
+		RequestID: mapStr(answerMap, "requestId"),
+		Answer:    mapStr(answerMap, "answer"),
 	})
 }
 
 func (a *App) handleCancel(data ...interface{}) {
-	if a.client != nil {
-		a.client.Cancel()
+	if client := a.getActiveClient(); client != nil {
+		client.Cancel()
 	}
 }
 
 func (a *App) handleSubmitReview(data ...interface{}) {
-	if len(data) == 0 {
-		return
-	}
-	// Parse comments from frontend
-	commentsRaw, ok := data[0].([]interface{})
+	commentsRaw, ok := firstAs[[]interface{}](data)
 	if !ok {
 		return
 	}
+	comments := parseReviewComments(commentsRaw)
+	a.SubmitReview(comments)
+}
+
+func parseReviewComments(raw []interface{}) []ReviewComment {
 	var comments []ReviewComment
-	for _, c := range commentsRaw {
-		cMap, ok := c.(map[string]interface{})
+	for _, c := range raw {
+		m, ok := c.(map[string]interface{})
 		if !ok {
 			continue
 		}
 		comment := ReviewComment{
-			ID:   cMap["id"].(string),
-			Type: cMap["type"].(string),
-			Text: cMap["text"].(string),
-		}
-		if fp, ok := cMap["filePath"].(string); ok {
-			comment.FilePath = fp
-		}
-		if ln, ok := cMap["lineNumber"].(float64); ok {
-			comment.LineNumber = int(ln)
-		}
-		if hi, ok := cMap["hunkIndex"].(float64); ok {
-			comment.HunkIndex = int(hi)
+			ID:         mapStr(m, "id"),
+			Type:       mapStr(m, "type"),
+			Text:       mapStr(m, "text"),
+			FilePath:   mapStr(m, "filePath"),
+			LineNumber: mapInt(m, "lineNumber"),
+			HunkIndex:  mapInt(m, "hunkIndex"),
 		}
 		comments = append(comments, comment)
 	}
-	a.SubmitReview(comments)
+	return comments
+}
+
+func mapStr(m map[string]interface{}, key string) string {
+	if v, ok := m[key].(string); ok {
+		return v
+	}
+	return ""
+}
+
+func mapInt(m map[string]interface{}, key string) int {
+	if v, ok := m[key].(float64); ok {
+		return int(v)
+	}
+	return 0
 }
 
 func (a *App) shutdown(ctx context.Context) {
 	if a.mcpServer != nil {
 		a.mcpServer.Stop()
 	}
-	if a.client != nil {
-		a.client.Close()
+	a.sessionMu.Lock()
+	for _, s := range a.sessions {
+		if s.Client != nil {
+			s.Client.Close()
+		}
 	}
+	a.sessionMu.Unlock()
 }
 
 // SetMode changes the agent's session mode
 func (a *App) SetMode(modeID string) error {
-	if a.client == nil {
+	client := a.getActiveClient()
+	if client == nil {
 		return fmt.Errorf("no active session")
 	}
-	return a.client.SetMode(modeID)
+	return client.SetMode(modeID)
 }
 
 // GetModes returns available session modes
 func (a *App) GetModes() []SessionMode {
-	if a.client == nil {
+	client := a.getActiveClient()
+	if client == nil {
 		return nil
 	}
-	return a.client.availableModes
+	return client.availableModes
 }
 
 // GetCurrentMode returns the current mode ID
 func (a *App) GetCurrentMode() string {
-	if a.client == nil {
+	client := a.getActiveClient()
+	if client == nil {
 		return ""
 	}
-	return a.client.currentModeID
+	return client.currentModeID
 }
 
 // NewACPClient creates a new ACP client
@@ -599,6 +745,7 @@ func NewACPClient(ctx context.Context, cwd string, mcpServers []any) (*ACPClient
 type ACPClientConfig struct {
 	CWD                string
 	MCPServers         []any
+	EventPrefix        string // e.g. "session:abc123:"
 	ChunkEventName     string // defaults to "chat_chunk"
 	AutoPermission     bool   // auto-allow all permissions
 	SuppressToolEvents bool   // don't emit tool_state events
@@ -610,6 +757,7 @@ func NewACPClientWithConfig(ctx context.Context, cfg ACPClientConfig) (*ACPClien
 	if err != nil {
 		return nil, err
 	}
+	client.eventPrefix = cfg.EventPrefix
 	if cfg.ChunkEventName != "" {
 		client.chunkEventName = cfg.ChunkEventName
 	}
@@ -630,6 +778,11 @@ func (c *ACPClient) logEvent(eventType string, data any) {
 	if b, err := json.Marshal(entry); err == nil {
 		c.logFile.Write(append(b, '\n'))
 	}
+}
+
+// emit emits an event with the session prefix
+func (c *ACPClient) emit(eventName string, data any) {
+	runtime.EventsEmit(c.ctx, c.eventPrefix+eventName, data)
 }
 
 func (c *ACPClient) closeAllCallbacks() {
@@ -703,7 +856,7 @@ func (c *ACPClient) handleMethod(msg JSONRPCMessage) {
 			s.PermissionOptions = req.Options
 		})
 		if state != nil {
-			runtime.EventsEmit(c.ctx, "tool_state", state)
+			c.emit("tool_state", state)
 		}
 
 		// Store msg for response
@@ -721,151 +874,147 @@ func (c *ACPClient) handleSessionUpdate(update SessionUpdate) {
 
 	switch u.SessionUpdate {
 	case "agent_message_chunk", "agent_thought_chunk":
-		// Parse content as TextContent
 		var content TextContent
 		if len(u.Content) > 0 {
 			json.Unmarshal(u.Content, &content)
 		}
-		eventName := c.chunkEventName
-		if eventName == "" {
-			eventName = "chat_chunk"
-		}
 		if u.SessionUpdate == "agent_message_chunk" {
-			runtime.EventsEmit(c.ctx, eventName, content.Text)
+			eventName := c.chunkEventName
+			if eventName == "" {
+				eventName = "chat_chunk"
+			}
+			c.emit(eventName, content.Text)
 		} else {
-			runtime.EventsEmit(c.ctx, "chat_thought", content.Text)
+			c.emit("chat_thought", content.Text)
 		}
 
 	case "tool_call":
-		// Skip tool_state events for review agent
 		if c.suppressToolEvents {
 			return
 		}
-
-		// Check if we already have this tool (tool_call events can come multiple times)
-		existing := c.toolManager.Get(u.ToolCallID)
-		if existing != nil {
-			// Update existing tool state
-			existing.Status = u.Status
-			existing.Title = u.Title
-			if u.RawInput != nil {
-				existing.Input = u.RawInput
-			}
-			runtime.EventsEmit(c.ctx, "tool_state", existing)
-			return
-		}
-
-		// Parse content as []DiffBlock for diffs
-		var diffs []DiffBlock
-		if len(u.Content) > 0 && u.Content[0] == '[' {
-			json.Unmarshal(u.Content, &diffs)
-		}
-
-		// Extract toolName from meta
-		var toolName string
-		if u.Meta != nil && u.Meta.ClaudeCode != nil {
-			toolName = u.Meta.ClaudeCode.ToolName
-		}
-
-		// Get current parent (if any) before potentially pushing this tool
-		parentID := c.toolManager.CurrentParent()
-
-		// Create new tool state
-		state := &ToolState{
-			ID:       u.ToolCallID,
-			Status:   u.Status,
-			Title:    u.Title,
-			Kind:     u.ToolKind,
-			ToolName: toolName,
-			ParentID: parentID,
-			Input:    u.RawInput,
-			Diffs:    diffs,
-		}
-
-		// If this is a Task tool, push it as a parent for subsequent tools
-		if toolName == "Task" {
-			c.toolManager.PushParent(u.ToolCallID)
-		}
-
-		c.toolManager.Set(state)
-		runtime.EventsEmit(c.ctx, "tool_state", state)
+		c.handleToolCall(u)
 
 	case "tool_call_update":
-		// For suppressed tool events, only track file changes
-		if c.suppressToolEvents {
-			if u.Meta != nil && u.Meta.ClaudeCode != nil && u.Meta.ClaudeCode.ToolResponse != nil {
-				tr := u.Meta.ClaudeCode.ToolResponse
-				toolName := ""
-				if u.Meta.ClaudeCode.ToolName != "" {
-					toolName = u.Meta.ClaudeCode.ToolName
-				}
-				if tr.FilePath != "" && (toolName == "Edit" || toolName == "Write") {
-					currentContent := tr.Content
-					if toolName == "Edit" && tr.Content == "" {
-						base := tr.OriginalFile
-						if existing := c.fileChangeStore.Get(tr.FilePath); existing != nil {
-							base = existing.CurrentContent
-						}
-						currentContent = strings.Replace(base, tr.OldString, tr.NewString, 1)
-					}
-					c.fileChangeStore.RecordChange(tr.FilePath, tr.OriginalFile, currentContent, tr.StructuredPatch)
-					runtime.EventsEmit(c.ctx, "file_changes_updated", c.fileChangeStore.GetAll())
-				}
-			}
-			return
-		}
-
-		// Update existing tool state
-		state := c.toolManager.Update(u.ToolCallID, func(s *ToolState) {
-			s.Status = u.Status
-			s.Output = u.Output
-
-			// Extract diff from _meta
-			if u.Meta != nil && u.Meta.ClaudeCode != nil && u.Meta.ClaudeCode.ToolResponse != nil {
-				tr := u.Meta.ClaudeCode.ToolResponse
-				if len(tr.StructuredPatch) > 0 || tr.OldString != "" || tr.NewString != "" {
-					s.Diff = map[string]any{
-						"filePath":        tr.FilePath,
-						"oldString":       tr.OldString,
-						"newString":       tr.NewString,
-						"originalFile":    tr.OriginalFile,
-						"structuredPatch": tr.StructuredPatch,
-						"type":            tr.Type,
-						"content":         tr.Content,
-					}
-				}
-
-				// Track file changes for review
-				if tr.FilePath != "" && (s.ToolName == "Edit" || s.ToolName == "Write") {
-					currentContent := tr.Content
-					if s.ToolName == "Edit" && tr.Content == "" {
-						// Edit tool: compute current from original + edit
-						base := tr.OriginalFile
-						if existing := c.fileChangeStore.Get(tr.FilePath); existing != nil {
-							base = existing.CurrentContent
-						}
-						currentContent = strings.Replace(base, tr.OldString, tr.NewString, 1)
-					}
-					c.fileChangeStore.RecordChange(tr.FilePath, tr.OriginalFile, currentContent, tr.StructuredPatch)
-					runtime.EventsEmit(c.ctx, "file_changes_updated", c.fileChangeStore.GetAll())
-				}
-			}
-		})
-		if state != nil {
-			// Pop from parent stack if Task tool completed
-			if state.ToolName == "Task" && (u.Status == "completed" || u.Status == "error" || u.Status == "failed") {
-				c.toolManager.PopParent(u.ToolCallID)
-			}
-			runtime.EventsEmit(c.ctx, "tool_state", state)
-		}
+		c.handleToolCallUpdate(u)
 
 	case "current_mode_update":
 		c.currentModeID = u.ModeID
-		runtime.EventsEmit(c.ctx, "mode_changed", u.ModeID)
+		c.emit("mode_changed", u.ModeID)
 
 	case "plan":
-		runtime.EventsEmit(c.ctx, "plan_update", u.Entries)
+		c.emit("plan_update", u.Entries)
 	}
+}
+
+func (c *ACPClient) handleToolCall(u UpdateContent) {
+	// Update existing tool if present
+	if existing := c.toolManager.Get(u.ToolCallID); existing != nil {
+		existing.Status = u.Status
+		existing.Title = u.Title
+		if u.RawInput != nil {
+			existing.Input = u.RawInput
+		}
+		c.emit("tool_state", existing)
+		return
+	}
+
+	// Parse diffs from content
+	var diffs []DiffBlock
+	if len(u.Content) > 0 && u.Content[0] == '[' {
+		json.Unmarshal(u.Content, &diffs)
+	}
+
+	toolName := c.extractToolName(u.Meta)
+	state := &ToolState{
+		ID:       u.ToolCallID,
+		Status:   u.Status,
+		Title:    u.Title,
+		Kind:     u.ToolKind,
+		ToolName: toolName,
+		ParentID: c.toolManager.CurrentParent(),
+		Input:    u.RawInput,
+		Diffs:    diffs,
+	}
+
+	if toolName == "Task" {
+		c.toolManager.PushParent(u.ToolCallID)
+	}
+
+	c.toolManager.Set(state)
+	c.emit("tool_state", state)
+}
+
+func (c *ACPClient) handleToolCallUpdate(u UpdateContent) {
+	// Suppressed mode: only track file changes
+	if c.suppressToolEvents {
+		toolName := c.extractToolName(u.Meta)
+		if tr := c.extractToolResponse(u.Meta); tr != nil {
+			c.trackFileChange(toolName, tr)
+		}
+		return
+	}
+
+	state := c.toolManager.Update(u.ToolCallID, func(s *ToolState) {
+		s.Status = u.Status
+		s.Output = u.Output
+
+		if tr := c.extractToolResponse(u.Meta); tr != nil {
+			if len(tr.StructuredPatch) > 0 || tr.OldString != "" || tr.NewString != "" {
+				s.Diff = map[string]any{
+					"filePath":        tr.FilePath,
+					"oldString":       tr.OldString,
+					"newString":       tr.NewString,
+					"originalFile":    tr.OriginalFile,
+					"structuredPatch": tr.StructuredPatch,
+					"type":            tr.Type,
+					"content":         tr.Content,
+				}
+			}
+			c.trackFileChange(s.ToolName, tr)
+		}
+	})
+
+	if state == nil {
+		return
+	}
+	if state.ToolName == "Task" && isTerminalStatus(u.Status) {
+		c.toolManager.PopParent(u.ToolCallID)
+	}
+	c.emit("tool_state", state)
+}
+
+func (c *ACPClient) extractToolName(meta *MetaContent) string {
+	if meta != nil && meta.ClaudeCode != nil {
+		return meta.ClaudeCode.ToolName
+	}
+	return ""
+}
+
+func (c *ACPClient) extractToolResponse(meta *MetaContent) *ToolResponse {
+	if meta != nil && meta.ClaudeCode != nil {
+		return meta.ClaudeCode.ToolResponse
+	}
+	return nil
+}
+
+func (c *ACPClient) trackFileChange(toolName string, tr *ToolResponse) {
+	if tr.FilePath == "" || (toolName != "Edit" && toolName != "Write") {
+		return
+	}
+	currentContent := tr.Content
+	if toolName == "Edit" && tr.Content == "" {
+		base := tr.OriginalFile
+		if existing := c.fileChangeStore.Get(tr.FilePath); existing != nil {
+			base = existing.CurrentContent
+		}
+		currentContent = strings.Replace(base, tr.OldString, tr.NewString, 1)
+	}
+	c.fileChangeStore.RecordChange(tr.FilePath, tr.OriginalFile, currentContent, tr.StructuredPatch)
+	c.emit("file_changes_updated", c.fileChangeStore.GetAll())
+}
+
+func isTerminalStatus(status string) bool {
+	return status == "completed" || status == "error" || status == "failed"
 }
 
 func (c *ACPClient) send(method string, params any) (JSONRPCMessage, error) {
@@ -962,11 +1111,12 @@ func (c *ACPClient) SetMode(modeID string) error {
 		"sessionId": c.sessionID,
 		"modeId":    modeID,
 	})
-	if err == nil {
-		c.currentModeID = modeID
-		runtime.EventsEmit(c.ctx, "mode_changed", modeID)
+	if err != nil {
+		return err
 	}
-	return err
+	c.currentModeID = modeID
+	c.emit("mode_changed", modeID)
+	return nil
 }
 
 func (c *ACPClient) sendPermissionResponse(id *int, optionID string) {
@@ -1007,17 +1157,20 @@ type ReviewComment struct {
 
 // SubmitReview spawns a fresh acp subprocess to address review feedback
 func (a *App) SubmitReview(comments []ReviewComment) {
-	if a.client == nil {
+	client := a.getActiveClient()
+	if client == nil {
 		return
 	}
 
-	changes := a.client.fileChangeStore.GetAll()
+	changes := client.fileChangeStore.GetAll()
 	if len(changes) == 0 && len(comments) == 0 {
 		return
 	}
 
+	eventPrefix := client.eventPrefix
+
 	go func() {
-		runtime.EventsEmit(a.ctx, "review_agent_running", true)
+		runtime.EventsEmit(a.ctx, eventPrefix+"review_agent_running", true)
 
 		// Build prompt
 		var prompt strings.Builder
@@ -1053,28 +1206,29 @@ func (a *App) SubmitReview(comments []ReviewComment) {
 		reviewClient, err := NewACPClientWithConfig(a.ctx, ACPClientConfig{
 			CWD:                cwd,
 			MCPServers:         []any{},
+			EventPrefix:        eventPrefix,
 			ChunkEventName:     "review_agent_chunk",
 			AutoPermission:     true,
 			SuppressToolEvents: true,
 		})
 		if err != nil {
-			runtime.EventsEmit(a.ctx, "review_agent_chunk", "Error: "+err.Error())
-			runtime.EventsEmit(a.ctx, "review_agent_complete", nil)
+			runtime.EventsEmit(a.ctx, eventPrefix+"review_agent_chunk", "Error: "+err.Error())
+			runtime.EventsEmit(a.ctx, eventPrefix+"review_agent_complete", nil)
 			return
 		}
 
 		// Share fileChangeStore with main client so review changes are tracked
-		reviewClient.fileChangeStore = a.client.fileChangeStore
+		reviewClient.fileChangeStore = client.fileChangeStore
 
 		// SendPrompt blocks until complete (callback-based)
 		_, err = reviewClient.SendPrompt(prompt.String(), []string{})
 
 		if err != nil {
-			runtime.EventsEmit(a.ctx, "review_agent_chunk", "\nError: "+err.Error())
+			runtime.EventsEmit(a.ctx, eventPrefix+"review_agent_chunk", "\nError: "+err.Error())
 		}
 
 		// Emit complete BEFORE Close() which may block on cmd.Wait()
-		runtime.EventsEmit(a.ctx, "review_agent_complete", nil)
+		runtime.EventsEmit(a.ctx, eventPrefix+"review_agent_complete", nil)
 
 		// Close in background to avoid blocking
 		go reviewClient.Close()

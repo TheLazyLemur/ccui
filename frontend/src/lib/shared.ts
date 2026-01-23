@@ -55,6 +55,25 @@ export interface SessionMode {
   description?: string;
 }
 
+export interface SessionInfo {
+  id: string;
+  name: string;
+  createdAt: string;
+  modeId: string;
+}
+
+export interface SessionState {
+  messages: Message[];
+  fileChanges: FileChange[];
+  reviewComments: ReviewComment[];
+  planEntries: PlanEntry[];
+  currentModeId: string;
+  currentChunk: string;
+  currentThought: string;
+  availableModes: SessionMode[];
+  isLoading: boolean;
+}
+
 export interface PlanEntry {
   content: string;
   priority: 'high' | 'medium' | 'low';

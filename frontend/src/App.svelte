@@ -7,8 +7,17 @@
   import ReviewPanel from './lib/ReviewPanel.svelte';
   import ModeSelector from './lib/ModeSelector.svelte';
   import PlanPanel from './lib/PlanPanel.svelte';
-  import { type Message, type ToolCall, type UserQuestion, type FileChange, type ReviewComment, type SessionMode, type PlanEntry, getStatusIndicator, getStatusClass } from './lib/shared';
+  import SessionSelector from './lib/SessionSelector.svelte';
+  import { type Message, type ToolCall, type UserQuestion, type FileChange, type ReviewComment, type SessionMode, type PlanEntry, type SessionInfo, type SessionState, getStatusIndicator, getStatusClass } from './lib/shared';
+  import { GetSessions, GetActiveSession, CreateSession } from '../wailsjs/go/main/App';
 
+  // Multi-session state
+  let sessions: SessionInfo[] = [];
+  let activeSessionId = '';
+  let sessionStates = new Map<string, SessionState>();
+  let unsubscribeFns: (() => void)[] = [];
+
+  // Current session's reactive state (bound to active session)
   let messages: Message[] = [];
   let inputText = '';
   let messagesContainer: HTMLDivElement;
@@ -32,6 +41,73 @@
   let availableModes: SessionMode[] = [];
   let currentModeId = '';
   let planEntries: PlanEntry[] = [];
+
+  function getOrCreateSessionState(id: string): SessionState {
+    if (!sessionStates.has(id)) {
+      sessionStates.set(id, {
+        messages: [],
+        fileChanges: [],
+        reviewComments: [],
+        planEntries: [],
+        currentModeId: '',
+        currentChunk: '',
+        currentThought: '',
+        availableModes: [],
+        isLoading: false
+      });
+    }
+    return sessionStates.get(id)!;
+  }
+
+  function saveCurrentSessionState() {
+    if (!activeSessionId) return;
+    const state = getOrCreateSessionState(activeSessionId);
+    Object.assign(state, { messages, fileChanges, reviewComments, planEntries, currentModeId, currentChunk, currentThought, availableModes, isLoading });
+  }
+
+  function loadSessionState(id: string) {
+    const state = getOrCreateSessionState(id);
+    ({ messages, fileChanges, reviewComments, planEntries, currentModeId, currentChunk, currentThought, availableModes, isLoading } = state);
+    messageId = messages.length > 0 ? Math.max(...messages.map(m => m.id)) : 0;
+  }
+
+  function subscribeToSession(sessionId: string) {
+    unsubscribeFns.forEach(fn => fn());
+    const on = (e: string, cb: (...args: any[]) => void) => unsubscribeFns.push(EventsOn(`session:${sessionId}:${e}`, cb));
+    unsubscribeFns = [];
+
+    on('chat_chunk', (t: string) => currentChunk += t);
+    on('chat_thought', (t: string) => currentThought += t);
+    on('tool_state', (state: ToolCall) => {
+      const idx = messages.findIndex(m => m.toolState?.id === state.id);
+      if (idx >= 0) { messages[idx].toolState = state; messages = messages; }
+      else messages = [...messages, { id: ++messageId, text: '', sender: 'tool', toolState: state }];
+    });
+    on('prompt_complete', () => {
+      if (currentChunk) { messages = [...messages, { id: ++messageId, text: currentChunk, sender: 'bot' }]; currentChunk = ''; }
+      currentThought = '';
+      isLoading = false;
+    });
+    on('error', (err: string) => {
+      messages = [...messages, { id: ++messageId, text: `Error: ${err}`, sender: 'bot' }];
+      isLoading = false;
+    });
+    on('file_changes_updated', (changes: FileChange[]) => fileChanges = changes);
+    on('review_agent_chunk', (t: string) => reviewAgentOutput += t);
+    on('review_agent_running', () => { reviewAgentRunning = true; reviewAgentOutput = ''; });
+    on('review_agent_complete', () => { reviewAgentRunning = false; reviewComments = []; });
+    on('modes_available', (modes: SessionMode[]) => availableModes = modes);
+    on('mode_changed', (modeId: string) => currentModeId = modeId);
+    on('plan_update', (entries: PlanEntry[]) => planEntries = entries);
+  }
+
+  function handleSessionChange(newSessionId: string) {
+    if (newSessionId === activeSessionId) return;
+    saveCurrentSessionState();
+    activeSessionId = newSessionId;
+    loadSessionState(newSessionId);
+    subscribeToSession(newSessionId);
+  }
 
   // Theme & font
   let isDark = false;
@@ -78,42 +154,35 @@
     textarea.style.height = Math.min(textarea.scrollHeight, 200) + 'px';
   }
 
-  onMount(() => {
+  onMount(async () => {
     loadSettings();
     window.addEventListener('keydown', handleGlobalKeydown);
 
-    EventsOn('chat_chunk', (t: string) => currentChunk += t);
-    EventsOn('chat_thought', (t: string) => currentThought += t);
-
-    EventsOn('tool_state', (state: ToolCall) => {
-      const idx = messages.findIndex(m => m.toolState?.id === state.id);
-      if (idx >= 0) { messages[idx].toolState = state; messages = messages; }
-      else messages = [...messages, { id: ++messageId, text: '', sender: 'tool', toolState: state }];
+    // Global session events (not prefixed)
+    EventsOn('sessions_updated', (s: SessionInfo[]) => { sessions = s; });
+    EventsOn('active_session_changed', (id: string) => {
+      if (id && id !== activeSessionId) {
+        handleSessionChange(id);
+      }
     });
 
-    EventsOn('prompt_complete', () => {
-      if (currentChunk) { messages = [...messages, { id: ++messageId, text: currentChunk, sender: 'bot' }]; currentChunk = ''; }
-      currentThought = '';
-      isLoading = false;
-    });
-
-    EventsOn('error', (err: string) => {
-      messages = [...messages, { id: ++messageId, text: `Error: ${err}`, sender: 'bot' }];
-      isLoading = false;
-    });
-
+    // User question is global (handled by MCP server)
     EventsOn('user_question', (q: UserQuestion) => { userQuestion = q; userAnswerInput = ''; });
 
-    // Review events
-    EventsOn('file_changes_updated', (changes: FileChange[]) => { fileChanges = changes; });
-    EventsOn('review_agent_chunk', (t: string) => { reviewAgentOutput += t; });
-    EventsOn('review_agent_running', () => { reviewAgentRunning = true; reviewAgentOutput = ''; });
-    EventsOn('review_agent_complete', () => { console.log('review_agent_complete received'); reviewAgentRunning = false; reviewComments = []; });
+    // Initialize: fetch existing sessions or create first one
+    const existingSessions = await GetSessions();
+    if (existingSessions.length > 0) {
+      sessions = existingSessions;
+      const active = await GetActiveSession();
+      if (active) handleSessionChange(active);
+      else handleSessionChange(existingSessions[0].id);
+    } else {
+      await CreateSession('Session 1');
+    }
 
-    // Session mode events
-    EventsOn('modes_available', (modes: SessionMode[]) => { availableModes = modes; });
-    EventsOn('mode_changed', (modeId: string) => { currentModeId = modeId; });
-    EventsOn('plan_update', (entries: PlanEntry[]) => { planEntries = entries; });
+    return () => {
+      unsubscribeFns.forEach(fn => fn());
+    };
   });
 
   afterUpdate(() => { if (messagesContainer) messagesContainer.scrollTop = messagesContainer.scrollHeight; });
@@ -142,18 +211,9 @@
     userAnswerInput = '';
   }
 
-  function handleAddComment(e: CustomEvent<ReviewComment>) {
-    reviewComments = [...reviewComments, e.detail];
-  }
-
-  function handleRemoveComment(e: CustomEvent<string>) {
-    reviewComments = reviewComments.filter(c => c.id !== e.detail);
-  }
-
-  function handleSubmitReview() {
-    EventsEmit('submit_review', reviewComments);
-  }
-
+  const handleAddComment = (e: CustomEvent<ReviewComment>) => reviewComments = [...reviewComments, e.detail];
+  const handleRemoveComment = (e: CustomEvent<string>) => reviewComments = reviewComments.filter(c => c.id !== e.detail);
+  const handleSubmitReview = () => EventsEmit('submit_review', reviewComments);
 </script>
 
 <div class="h-full bg-paper paper-texture" style="zoom: {fontScale}">
@@ -162,6 +222,7 @@
     <header class="px-6 py-4 flex justify-between items-center border-b border-ink-faint relative z-20">
       <div class="flex items-center gap-4">
         <h1 class="text-lg font-medium tracking-tight text-ink">ccui</h1>
+        <SessionSelector {sessions} {activeSessionId} on:sessionChange={(e) => handleSessionChange(e.detail)} />
         <TabBar {activeTab} changeCount={fileChanges.length} on:tabChange={(e) => activeTab = e.detail} />
         <ModeSelector modes={availableModes} {currentModeId} />
       </div>
