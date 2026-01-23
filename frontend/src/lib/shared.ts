@@ -33,6 +33,22 @@ export interface UserQuestion {
   options?: { label: string; description?: string }[];
 }
 
+export interface FileChange {
+  filePath: string;
+  originalContent: string;
+  currentContent: string;
+  hunks: PatchHunk[];
+}
+
+export interface ReviewComment {
+  id: string;
+  type: 'line' | 'hunk' | 'general';
+  filePath?: string;
+  lineNumber?: number;
+  hunkIndex?: number;
+  text: string;
+}
+
 const STATUS_INDICATORS: Record<string, string> = {
   pending: '○', awaiting_permission: '◇', running: '◎', completed: '●', error: '✕'
 };

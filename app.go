@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -180,6 +181,58 @@ type ToolCallManager struct {
 	mu          sync.RWMutex
 }
 
+// FileChange tracks a file's changes during the session
+type FileChange struct {
+	FilePath        string      `json:"filePath"`
+	OriginalContent string      `json:"originalContent"`
+	CurrentContent  string      `json:"currentContent"`
+	Hunks           []PatchHunk `json:"hunks"`
+}
+
+// FileChangeStore accumulates file changes, coalesces to latest state
+type FileChangeStore struct {
+	changes map[string]*FileChange
+	mu      sync.RWMutex
+}
+
+func NewFileChangeStore() *FileChangeStore {
+	return &FileChangeStore{changes: make(map[string]*FileChange)}
+}
+
+func (s *FileChangeStore) RecordChange(filePath, originalContent, currentContent string, hunks []PatchHunk) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if existing, ok := s.changes[filePath]; ok {
+		// Coalesce: keep original, update current
+		existing.CurrentContent = currentContent
+		existing.Hunks = hunks
+	} else {
+		s.changes[filePath] = &FileChange{
+			FilePath:        filePath,
+			OriginalContent: originalContent,
+			CurrentContent:  currentContent,
+			Hunks:           hunks,
+		}
+	}
+}
+
+func (s *FileChangeStore) GetAll() []FileChange {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	result := make([]FileChange, 0, len(s.changes))
+	for _, c := range s.changes {
+		result = append(result, *c)
+	}
+	return result
+}
+
+func (s *FileChangeStore) Clear() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.changes = make(map[string]*FileChange)
+}
+
 func NewToolCallManager() *ToolCallManager {
 	return &ToolCallManager{tools: make(map[string]*ToolState)}
 }
@@ -246,7 +299,8 @@ type ACPClient struct {
 	logFile   *os.File
 
 	// Tool tracking
-	toolManager *ToolCallManager
+	toolManager     *ToolCallManager
+	fileChangeStore *FileChangeStore
 
 	// Permission handling
 	permissionRespCh chan string
@@ -283,6 +337,7 @@ func (a *App) startup(ctx context.Context) {
 	runtime.EventsOn(ctx, "permission_response", a.handlePermissionResponse)
 	runtime.EventsOn(ctx, "user_answer", a.handleUserAnswer)
 	runtime.EventsOn(ctx, "cancel", a.handleCancel)
+	runtime.EventsOn(ctx, "submit_review", a.handleSubmitReview)
 }
 
 func (a *App) handleSendMessage(data ...interface{}) {
@@ -370,6 +425,40 @@ func (a *App) handleCancel(data ...interface{}) {
 	}
 }
 
+func (a *App) handleSubmitReview(data ...interface{}) {
+	if len(data) == 0 {
+		return
+	}
+	// Parse comments from frontend
+	commentsRaw, ok := data[0].([]interface{})
+	if !ok {
+		return
+	}
+	var comments []ReviewComment
+	for _, c := range commentsRaw {
+		cMap, ok := c.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		comment := ReviewComment{
+			ID:   cMap["id"].(string),
+			Type: cMap["type"].(string),
+			Text: cMap["text"].(string),
+		}
+		if fp, ok := cMap["filePath"].(string); ok {
+			comment.FilePath = fp
+		}
+		if ln, ok := cMap["lineNumber"].(float64); ok {
+			comment.LineNumber = int(ln)
+		}
+		if hi, ok := cMap["hunkIndex"].(float64); ok {
+			comment.HunkIndex = int(hi)
+		}
+		comments = append(comments, comment)
+	}
+	a.SubmitReview(comments)
+}
+
 func (a *App) shutdown(ctx context.Context) {
 	if a.mcpServer != nil {
 		a.mcpServer.Stop()
@@ -415,6 +504,7 @@ func NewACPClient(ctx context.Context, cwd string, mcpServers []any) (*ACPClient
 		ctx:              ctx,
 		logFile:          logFile,
 		toolManager:      NewToolCallManager(),
+		fileChangeStore:  NewFileChangeStore(),
 		permissionRespCh: make(chan string, 1),
 	}
 
@@ -600,6 +690,12 @@ func (c *ACPClient) handleSessionUpdate(update SessionUpdate) {
 						"content":         tr.Content,
 					}
 				}
+
+				// Track file changes for review
+				if tr.FilePath != "" && (s.ToolName == "Edit" || s.ToolName == "Write") {
+					c.fileChangeStore.RecordChange(tr.FilePath, tr.OriginalFile, tr.Content, tr.StructuredPatch)
+					runtime.EventsEmit(c.ctx, "file_changes_updated", c.fileChangeStore.GetAll())
+				}
 			}
 		})
 		if state != nil {
@@ -718,4 +814,175 @@ func (c *ACPClient) Close() error {
 	}
 	c.stdin.Close()
 	return c.cmd.Wait()
+}
+
+// ReviewComment from frontend
+type ReviewComment struct {
+	ID         string `json:"id"`
+	Type       string `json:"type"` // line, hunk, general
+	FilePath   string `json:"filePath,omitempty"`
+	LineNumber int    `json:"lineNumber,omitempty"`
+	HunkIndex  int    `json:"hunkIndex,omitempty"`
+	Text       string `json:"text"`
+}
+
+// SubmitReview spawns a fresh acp subprocess to address review feedback
+func (a *App) SubmitReview(comments []ReviewComment) {
+	if a.client == nil {
+		return
+	}
+
+	changes := a.client.fileChangeStore.GetAll()
+	if len(changes) == 0 && len(comments) == 0 {
+		return
+	}
+
+	go func() {
+		runtime.EventsEmit(a.ctx, "review_agent_running", true)
+
+		// Build prompt
+		var prompt strings.Builder
+		prompt.WriteString("Review feedback for recent changes:\n\n")
+
+		for _, c := range changes {
+			prompt.WriteString(fmt.Sprintf("## File: %s\n", c.FilePath))
+			prompt.WriteString("```diff\n")
+			for _, h := range c.Hunks {
+				prompt.WriteString(fmt.Sprintf("@@ -%d,%d +%d,%d @@\n", h.OldStart, h.OldLines, h.NewStart, h.NewLines))
+				for _, line := range h.Lines {
+					prompt.WriteString(line + "\n")
+				}
+			}
+			prompt.WriteString("```\n\n")
+		}
+
+		prompt.WriteString("## Review Comments:\n")
+		for _, c := range comments {
+			switch c.Type {
+			case "line":
+				prompt.WriteString(fmt.Sprintf("- [%s:%d] %s\n", c.FilePath, c.LineNumber, c.Text))
+			case "hunk":
+				prompt.WriteString(fmt.Sprintf("- [%s hunk %d] %s\n", c.FilePath, c.HunkIndex+1, c.Text))
+			default:
+				prompt.WriteString(fmt.Sprintf("- [General] %s\n", c.Text))
+			}
+		}
+		prompt.WriteString("\nPlease address this feedback by making the necessary changes.")
+
+		// Spawn fresh subprocess
+		cwd, _ := os.Getwd()
+		cmd := exec.CommandContext(a.ctx, "claude-code-acp")
+		cmd.Env = append(os.Environ(), "ANTHROPIC_API_KEY="+os.Getenv("ANTHROPIC_API_KEY"))
+		cmd.Dir = cwd
+
+		stdin, err := cmd.StdinPipe()
+		if err != nil {
+			runtime.EventsEmit(a.ctx, "review_agent_chunk", "Error: "+err.Error())
+			runtime.EventsEmit(a.ctx, "review_agent_complete", nil)
+			return
+		}
+		stdout, err := cmd.StdoutPipe()
+		if err != nil {
+			runtime.EventsEmit(a.ctx, "review_agent_chunk", "Error: "+err.Error())
+			runtime.EventsEmit(a.ctx, "review_agent_complete", nil)
+			return
+		}
+		cmd.Stderr = os.Stderr
+
+		if err := cmd.Start(); err != nil {
+			runtime.EventsEmit(a.ctx, "review_agent_chunk", "Error: "+err.Error())
+			runtime.EventsEmit(a.ctx, "review_agent_complete", nil)
+			return
+		}
+
+		scanner := bufio.NewScanner(stdout)
+		done := make(chan struct{})
+
+		// Read loop for review agent
+		go func() {
+			defer close(done)
+			var sessionID string
+			msgID := 0
+
+			// Initialize
+			msgID++
+			initMsg := JSONRPCMessage{JSONRPC: "2.0", ID: &msgID, Method: "initialize"}
+			initMsg.Params, _ = json.Marshal(InitializeParams{ProtocolVersion: 1, ClientCapabilities: ClientCapabilities{}})
+			data, _ := json.Marshal(initMsg)
+			stdin.Write(append(data, '\n'))
+
+			// Read init response
+			for scanner.Scan() {
+				var msg JSONRPCMessage
+				if json.Unmarshal(scanner.Bytes(), &msg) == nil && msg.ID != nil && *msg.ID == msgID {
+					break
+				}
+			}
+
+			// New session
+			msgID++
+			newSessMsg := JSONRPCMessage{JSONRPC: "2.0", ID: &msgID, Method: "session/new"}
+			newSessMsg.Params, _ = json.Marshal(map[string]any{"cwd": cwd, "mcpServers": []any{}})
+			data, _ = json.Marshal(newSessMsg)
+			stdin.Write(append(data, '\n'))
+
+			// Read session response
+			for scanner.Scan() {
+				var msg JSONRPCMessage
+				if json.Unmarshal(scanner.Bytes(), &msg) == nil && msg.ID != nil && *msg.ID == msgID {
+					var result SessionNewResult
+					json.Unmarshal(msg.Result, &result)
+					sessionID = result.SessionID
+					break
+				}
+			}
+
+			// Send prompt
+			msgID++
+			promptMsg := JSONRPCMessage{JSONRPC: "2.0", ID: &msgID, Method: "session/prompt"}
+			promptMsg.Params, _ = json.Marshal(SessionPromptParams{SessionID: sessionID, Prompt: []PromptContent{{Type: "text", Text: prompt.String()}}})
+			data, _ = json.Marshal(promptMsg)
+			stdin.Write(append(data, '\n'))
+
+			// Stream updates
+			for scanner.Scan() {
+				line := scanner.Bytes()
+				var msg JSONRPCMessage
+				if json.Unmarshal(line, &msg) != nil {
+					continue
+				}
+
+				if msg.Method == "session/update" {
+					var update SessionUpdate
+					json.Unmarshal(msg.Params, &update)
+					if update.Update.SessionUpdate == "agent_message_chunk" {
+						var content TextContent
+						json.Unmarshal(update.Update.Content, &content)
+						runtime.EventsEmit(a.ctx, "review_agent_chunk", content.Text)
+					}
+				} else if msg.ID != nil && *msg.ID == msgID {
+					// Prompt complete
+					break
+				} else if msg.Method == "session/request_permission" {
+					// Auto-allow for review agent
+					var req PermissionRequest
+					json.Unmarshal(msg.Params, &req)
+					resp := JSONRPCMessage{JSONRPC: "2.0", ID: msg.ID}
+					result, _ := json.Marshal(PermissionResponse{Outcome: PermissionOutcome{Outcome: "selected", OptionID: "allow_always"}})
+					resp.Result = result
+					data, _ := json.Marshal(resp)
+					stdin.Write(append(data, '\n'))
+				}
+			}
+		}()
+
+		<-done
+		stdin.Close()
+		cmd.Wait()
+
+		// Clear file changes after review
+		a.client.fileChangeStore.Clear()
+		runtime.EventsEmit(a.ctx, "file_changes_updated", []FileChange{})
+		runtime.EventsEmit(a.ctx, "review_agent_complete", nil)
+	}()
 }

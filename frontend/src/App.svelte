@@ -3,7 +3,9 @@
   import { EventsOn, EventsEmit } from '../wailsjs/runtime/runtime';
   import { marked } from 'marked';
   import ToolCard from './lib/ToolCard.svelte';
-  import { type Message, type ToolCall, type UserQuestion, getStatusIndicator, getStatusClass } from './lib/shared';
+  import TabBar from './lib/TabBar.svelte';
+  import ReviewPanel from './lib/ReviewPanel.svelte';
+  import { type Message, type ToolCall, type UserQuestion, type FileChange, type ReviewComment, getStatusIndicator, getStatusClass } from './lib/shared';
 
   let messages: Message[] = [];
   let inputText = '';
@@ -16,6 +18,13 @@
   let userQuestion: UserQuestion | null = null;
   let userAnswerInput = '';
   let expandedSubagents: Set<string> = new Set();
+
+  // Review tab state
+  let activeTab: 'chat' | 'review' = 'chat';
+  let fileChanges: FileChange[] = [];
+  let reviewComments: ReviewComment[] = [];
+  let reviewAgentOutput = '';
+  let reviewAgentRunning = false;
 
   // Theme & font
   let isDark = false;
@@ -87,6 +96,12 @@
     });
 
     EventsOn('user_question', (q: UserQuestion) => { userQuestion = q; userAnswerInput = ''; });
+
+    // Review events
+    EventsOn('file_changes_updated', (changes: FileChange[]) => { fileChanges = changes; });
+    EventsOn('review_agent_chunk', (t: string) => { reviewAgentOutput += t; });
+    EventsOn('review_agent_running', () => { reviewAgentRunning = true; reviewAgentOutput = ''; });
+    EventsOn('review_agent_complete', () => { reviewAgentRunning = false; reviewComments = []; });
   });
 
   afterUpdate(() => { if (messagesContainer) messagesContainer.scrollTop = messagesContainer.scrollHeight; });
@@ -115,13 +130,28 @@
     userAnswerInput = '';
   }
 
+  function handleAddComment(e: CustomEvent<ReviewComment>) {
+    reviewComments = [...reviewComments, e.detail];
+  }
+
+  function handleRemoveComment(e: CustomEvent<string>) {
+    reviewComments = reviewComments.filter(c => c.id !== e.detail);
+  }
+
+  function handleSubmitReview() {
+    EventsEmit('submit_review', reviewComments);
+  }
+
 </script>
 
 <div class="h-full bg-paper paper-texture" style="zoom: {fontScale}">
   <div class="h-full flex flex-col max-w-4xl mx-auto">
     <!-- Header -->
     <header class="px-6 py-4 flex justify-between items-center border-b border-ink-faint relative z-10">
-      <h1 class="text-lg font-medium tracking-tight text-ink">ccui</h1>
+      <div class="flex items-center gap-4">
+        <h1 class="text-lg font-medium tracking-tight text-ink">ccui</h1>
+        <TabBar {activeTab} changeCount={fileChanges.length} on:tabChange={(e) => activeTab = e.detail} />
+      </div>
       <div class="flex items-center gap-4">
         {#if isLoading}
           <button on:click={cancelRequest} class="px-3 py-1.5 text-sm border border-ink-faint text-ink-medium hover:border-ink-muted hover:text-ink transition-colors">Cancel</button>
@@ -133,6 +163,7 @@
       </div>
     </header>
 
+    {#if activeTab === 'chat'}
     <!-- Messages -->
     <div bind:this={messagesContainer} class="flex-1 overflow-y-auto px-6 py-6 space-y-5 relative z-10">
       {#each messages as msg, i (msg.id)}
@@ -243,5 +274,17 @@
         </button>
       </div>
     </div>
+    {:else}
+    <!-- Review Panel -->
+    <ReviewPanel
+      {fileChanges}
+      comments={reviewComments}
+      agentOutput={reviewAgentOutput}
+      agentRunning={reviewAgentRunning}
+      on:addComment={handleAddComment}
+      on:removeComment={handleRemoveComment}
+      on:submitReview={handleSubmitReview}
+    />
+    {/if}
   </div>
 </div>
