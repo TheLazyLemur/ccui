@@ -71,6 +71,39 @@
   // Subagent collapse state
   let expandedSubagents: Set<string> = new Set();
 
+  // Font scaling (Cmd/Ctrl +/-)
+  let fontScale = 1;
+  const FONT_SCALE_KEY = 'ccui-font-scale';
+
+  function loadFontScale() {
+    const stored = localStorage.getItem(FONT_SCALE_KEY);
+    if (stored) fontScale = parseFloat(stored);
+  }
+
+  function saveFontScale() {
+    localStorage.setItem(FONT_SCALE_KEY, fontScale.toString());
+  }
+
+  function handleGlobalKeydown(e: KeyboardEvent) {
+    if (!(e.metaKey || e.ctrlKey)) return;
+    if (e.key === '=' || e.key === '+') {
+      e.preventDefault();
+      fontScale = Math.min(fontScale + 0.1, 2);
+      saveFontScale();
+      console.log('Zoom in:', fontScale);
+    } else if (e.key === '-') {
+      e.preventDefault();
+      fontScale = Math.max(fontScale - 0.1, 0.5);
+      saveFontScale();
+      console.log('Zoom out:', fontScale);
+    } else if (e.key === '0') {
+      e.preventDefault();
+      fontScale = 1;
+      saveFontScale();
+      console.log('Zoom reset:', fontScale);
+    }
+  }
+
   function toggleSubagent(id: string) {
     if (expandedSubagents.has(id)) {
       expandedSubagents.delete(id);
@@ -103,7 +136,8 @@
   }
 
   onMount(() => {
-    console.log('App mounted, registering event listeners...');
+    loadFontScale();
+    window.addEventListener('keydown', handleGlobalKeydown);
 
     EventsOn('chat_chunk', (text: string) => {
       currentChunk += text;
@@ -232,7 +266,7 @@
   }
 </script>
 
-<div class="h-full p-5 bg-ink-dark">
+<div class="h-full p-5 bg-ink-dark" style="zoom: {fontScale}">
 <div class="h-full flex flex-col bg-parchment-light rounded-2xl overflow-hidden shadow-xl">
   <!-- Header -->
   <header class="px-8 py-5 border-b border-ink-muted/15 bg-parchment-glow/80 flex justify-between items-center">
