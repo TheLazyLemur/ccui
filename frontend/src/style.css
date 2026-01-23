@@ -1,1 +1,221 @@
-/* minimal reset */
+@import "tailwindcss";
+@plugin "@tailwindcss/typography";
+
+@theme {
+  /* Warm parchment palette */
+  --color-ink-deep: #1a1612;
+  --color-ink-dark: #2d2722;
+  --color-ink-medium: #4a423a;
+  --color-ink-light: #6b6158;
+  --color-ink-muted: #958b7f;
+
+  --color-parchment-dark: #d4cbbf;
+  --color-parchment-base: #e8e0d4;
+  --color-parchment-light: #f4efe7;
+  --color-parchment-glow: #faf7f2;
+
+  --color-accent-copper: #b87333;
+  --color-accent-rust: #a0522d;
+  --color-accent-sage: #6b7c5e;
+  --color-accent-wine: #722f37;
+  --color-accent-gold: #c9a227;
+
+  /* Diff colors */
+  --color-diff-add-bg: #e8f4e8;
+  --color-diff-add-text: #2d5a2d;
+  --color-diff-add-border: #6b9b6b;
+  --color-diff-remove-bg: #f8e8e8;
+  --color-diff-remove-text: #8b3a3a;
+  --color-diff-remove-border: #c47070;
+}
+
+
+html, body {
+  height: 100%;
+  overflow: hidden;
+}
+
+body {
+  font-family: 'Source Sans 3', -apple-system, sans-serif;
+  background: #2d2722;
+  color: #1a1612;
+  -webkit-font-smoothing: antialiased;
+}
+
+#app {
+  height: 100%;
+}
+
+/* Custom scrollbar - subtle and elegant */
+::-webkit-scrollbar {
+  width: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--color-ink-muted);
+  border-radius: 4px;
+  border: 2px solid var(--color-parchment-light);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-ink-light);
+}
+
+/* Animations */
+@keyframes fade-rise {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes gentle-pulse {
+  0%, 100% { opacity: 0.4; }
+  50% { opacity: 1; }
+}
+
+@keyframes ink-spread {
+  0% {
+    transform: scale(0.95);
+    opacity: 0;
+  }
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+@keyframes quill-write {
+  0%, 100% { transform: translateX(0); }
+  50% { transform: translateX(2px); }
+}
+
+@keyframes paper-unfold {
+  from {
+    opacity: 0;
+    transform: perspective(800px) rotateX(-5deg);
+  }
+  to {
+    opacity: 1;
+    transform: perspective(800px) rotateX(0);
+  }
+}
+
+.animate-fade-rise {
+  animation: fade-rise 0.4s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+
+.animate-ink-spread {
+  animation: ink-spread 0.3s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+
+.animate-paper-unfold {
+  animation: paper-unfold 0.5s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+
+.animate-quill {
+  animation: quill-write 1.5s ease-in-out infinite;
+}
+
+.animate-gentle-pulse {
+  animation: gentle-pulse 2s ease-in-out infinite;
+}
+
+/* Paper texture overlay */
+.paper-texture {
+  position: relative;
+}
+
+.paper-texture::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background-image:
+    url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)'/%3E%3C/svg%3E");
+  opacity: 0.03;
+  pointer-events: none;
+  mix-blend-mode: multiply;
+}
+
+/* Typography utilities */
+.font-editorial {
+  font-family: 'Cormorant Garamond', Georgia, serif;
+}
+
+.font-mono-refined {
+  font-family: 'IBM Plex Mono', 'Menlo', monospace;
+}
+
+/* Decorative elements */
+.ornament {
+  color: var(--color-ink-muted);
+  font-family: 'Cormorant Garamond', serif;
+}
+
+/* Focus styles */
+*:focus-visible {
+  outline: 2px solid var(--color-accent-copper);
+  outline-offset: 2px;
+}
+
+/* Selection */
+::selection {
+  background: var(--color-accent-gold);
+  color: var(--color-ink-deep);
+}
+
+/* Prose styling for markdown */
+.prose-ink {
+  --tw-prose-body: var(--color-ink-dark);
+  --tw-prose-headings: var(--color-ink-deep);
+  --tw-prose-links: var(--color-accent-copper);
+  --tw-prose-bold: var(--color-ink-deep);
+  --tw-prose-code: var(--color-ink-deep);
+  --tw-prose-pre-bg: var(--color-parchment-dark);
+  --tw-prose-pre-code: var(--color-ink-dark);
+}
+
+.prose-ink pre {
+  background: var(--color-parchment-dark);
+  border-radius: 0.5rem;
+  padding: 1rem;
+  overflow-x: auto;
+}
+
+.prose-ink code {
+  font-family: 'IBM Plex Mono', 'Menlo', monospace;
+  font-size: 0.875em;
+  background: var(--color-parchment-dark);
+  padding: 0.125rem 0.375rem;
+  border-radius: 0.25rem;
+}
+
+.prose-ink pre code {
+  background: transparent;
+  padding: 0;
+}
+
+.prose-ink p {
+  margin-bottom: 0.75rem;
+}
+
+.prose-ink p:last-child {
+  margin-bottom: 0;
+}
+
+.prose-ink ul, .prose-ink ol {
+  margin: 0.5rem 0;
+  padding-left: 1.25rem;
+}
+
+.prose-ink li {
+  margin: 0.25rem 0;
+}
