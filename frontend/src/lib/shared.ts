@@ -72,6 +72,8 @@ export interface SessionState {
   currentThought: string;
   availableModes: SessionMode[];
   isLoading: boolean;
+  reviewAgentOutput: string;
+  reviewAgentRunning: boolean;
 }
 
 export interface PlanEntry {

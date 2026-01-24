@@ -53,7 +53,9 @@
         currentChunk: '',
         currentThought: '',
         availableModes: [],
-        isLoading: false
+        isLoading: false,
+        reviewAgentOutput: '',
+        reviewAgentRunning: false
       });
     }
     return sessionStates.get(id)!;
@@ -62,12 +64,12 @@
   function saveCurrentSessionState() {
     if (!activeSessionId) return;
     const state = getOrCreateSessionState(activeSessionId);
-    Object.assign(state, { messages, fileChanges, reviewComments, planEntries, currentModeId, currentChunk, currentThought, availableModes, isLoading });
+    Object.assign(state, { messages, fileChanges, reviewComments, planEntries, currentModeId, currentChunk, currentThought, availableModes, isLoading, reviewAgentOutput, reviewAgentRunning });
   }
 
   function loadSessionState(id: string) {
     const state = getOrCreateSessionState(id);
-    ({ messages, fileChanges, reviewComments, planEntries, currentModeId, currentChunk, currentThought, availableModes, isLoading } = state);
+    ({ messages, fileChanges, reviewComments, planEntries, currentModeId, currentChunk, currentThought, availableModes, isLoading, reviewAgentOutput, reviewAgentRunning } = state);
   }
 
   function subscribeToSession(sessionId: string) {
@@ -116,9 +118,9 @@
       syncIfActive();
     });
     on('file_changes_updated', (changes: FileChange[]) => { state.fileChanges = changes; syncIfActive(); });
-    on('review_agent_chunk', (t: string) => reviewAgentOutput += t);
-    on('review_agent_running', () => { reviewAgentRunning = true; reviewAgentOutput = ''; });
-    on('review_agent_complete', () => { reviewAgentRunning = false; reviewComments = []; });
+    on('review_agent_chunk', (t: string) => { state.reviewAgentOutput += t; syncIfActive(); });
+    on('review_agent_running', () => { state.reviewAgentRunning = true; state.reviewAgentOutput = ''; syncIfActive(); });
+    on('review_agent_complete', () => { state.reviewAgentRunning = false; state.reviewComments = []; syncIfActive(); });
     on('modes_available', (modes: SessionMode[]) => { state.availableModes = modes; syncIfActive(); });
     on('mode_changed', (modeId: string) => { state.currentModeId = modeId; syncIfActive(); });
     on('plan_update', (entries: PlanEntry[]) => { state.planEntries = entries; syncIfActive(); });
