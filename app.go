@@ -88,6 +88,7 @@ type UpdateContent struct {
 	Input         map[string]any  `json:"input,omitempty"`
 	Output        []OutputBlock   `json:"output,omitempty"`
 	RawInput      map[string]any  `json:"rawInput,omitempty"`
+	RawOutput     *ToolRawOutput  `json:"rawOutput,omitempty"`
 	Meta          *MetaContent    `json:"_meta,omitempty"`
 	// Mode updates
 	ModeID string `json:"modeId,omitempty"`
@@ -112,6 +113,27 @@ type ToolResponse struct {
 	OriginalFile    string      `json:"originalFile,omitempty"`
 	StructuredPatch []PatchHunk `json:"structuredPatch,omitempty"`
 	Type            string      `json:"type,omitempty"`
+}
+
+type ToolRawOutput struct {
+	Output   string              `json:"output,omitempty"`
+	Metadata *ToolOutputMetadata `json:"metadata,omitempty"`
+}
+
+type ToolOutputMetadata struct {
+	Diff      string    `json:"diff,omitempty"`
+	Filediff  *FileDiff `json:"filediff,omitempty"`
+	Filepath  string    `json:"filepath,omitempty"`
+	Exists    bool      `json:"exists,omitempty"`
+	Truncated bool      `json:"truncated,omitempty"`
+}
+
+type FileDiff struct {
+	File      string `json:"file,omitempty"`
+	Before    string `json:"before,omitempty"`
+	After     string `json:"after,omitempty"`
+	Additions int    `json:"additions,omitempty"`
+	Deletions int    `json:"deletions,omitempty"`
 }
 
 type PatchHunk struct {
@@ -331,6 +353,7 @@ type ACPClient struct {
 	// Tool tracking
 	toolManager     *ToolCallManager
 	fileChangeStore *FileChangeStore
+	toolAdapters    []ToolEventAdapter
 
 	// Permission handling
 	permissionRespCh chan string
@@ -688,8 +711,8 @@ func (a *App) GetCurrentMode() string {
 
 // NewACPClient creates a new ACP client
 func NewACPClient(ctx context.Context, cwd string, mcpServers []any) (*ACPClient, error) {
-	// cmd := exec.CommandContext(ctx, "claude-code-acp")
-	cmd := exec.CommandContext(ctx, "opencode", "acp")
+	cmd := exec.CommandContext(ctx, "claude-code-acp")
+	// cmd := exec.CommandContext(ctx, "opencode", "acp")
 	// cmd := exec.CommandContext(ctx, "/Users/danrousseau/Programming/ai-agents/acp-glm/acp-glm")
 	cmd.Env = append(os.Environ(), "ANTHROPIC_API_KEY="+os.Getenv("ANTHROPIC_API_KEY"))
 	cmd.Dir = cwd
@@ -725,6 +748,7 @@ func NewACPClient(ctx context.Context, cwd string, mcpServers []any) (*ACPClient
 		logFile:          logFile,
 		toolManager:      NewToolCallManager(),
 		fileChangeStore:  NewFileChangeStore(),
+		toolAdapters:     defaultToolAdapters(),
 		permissionRespCh: make(chan string, 1),
 	}
 
@@ -909,24 +933,26 @@ func (c *ACPClient) handleSessionUpdate(update SessionUpdate) {
 }
 
 func (c *ACPClient) handleToolCall(u UpdateContent) {
+	adapter := c.adapterFor(u)
+	toolName := resolveToolName(adapter, u)
+	var diffs []DiffBlock
+	if adapter != nil {
+		diffs = adapter.DiffBlocks(u)
+	}
+
 	// Update existing tool if present
 	if existing := c.toolManager.Get(u.ToolCallID); existing != nil {
 		existing.Status = u.Status
 		existing.Title = u.Title
+		if existing.ToolName == "" {
+			existing.ToolName = toolName
+		}
 		if u.RawInput != nil {
 			existing.Input = u.RawInput
 		}
 		c.emit("tool_state", existing)
 		return
 	}
-
-	// Parse diffs from content
-	var diffs []DiffBlock
-	if len(u.Content) > 0 && u.Content[0] == '[' {
-		json.Unmarshal(u.Content, &diffs)
-	}
-
-	toolName := c.extractToolName(u.Meta)
 	state := &ToolState{
 		ID:       u.ToolCallID,
 		Status:   u.Status,
@@ -947,32 +973,46 @@ func (c *ACPClient) handleToolCall(u UpdateContent) {
 }
 
 func (c *ACPClient) handleToolCallUpdate(u UpdateContent) {
+	adapter := c.adapterFor(u)
+	toolName := resolveToolName(adapter, u)
+	var diffs []DiffBlock
+	var toolResponse *ToolResponse
+	if adapter != nil {
+		diffs = adapter.DiffBlocks(u)
+		toolResponse = adapter.ToolResponse(u)
+	}
+
 	// Suppressed mode: only track file changes
 	if c.suppressToolEvents {
-		toolName := c.extractToolName(u.Meta)
-		if tr := c.extractToolResponse(u.Meta); tr != nil {
-			c.trackFileChange(toolName, tr)
+		if toolResponse != nil {
+			c.trackFileChange(toolName, toolResponse)
 		}
 		return
 	}
-
 	state := c.toolManager.Update(u.ToolCallID, func(s *ToolState) {
 		s.Status = u.Status
 		s.Output = u.Output
-
-		if tr := c.extractToolResponse(u.Meta); tr != nil {
-			if len(tr.StructuredPatch) > 0 || tr.OldString != "" || tr.NewString != "" {
+		if u.RawInput != nil {
+			s.Input = u.RawInput
+		}
+		if s.ToolName == "" {
+			s.ToolName = toolName
+		}
+		if toolResponse != nil {
+			if len(toolResponse.StructuredPatch) > 0 || toolResponse.OldString != "" || toolResponse.NewString != "" || toolResponse.Content != "" {
 				s.Diff = map[string]any{
-					"filePath":        tr.FilePath,
-					"oldString":       tr.OldString,
-					"newString":       tr.NewString,
-					"originalFile":    tr.OriginalFile,
-					"structuredPatch": tr.StructuredPatch,
-					"type":            tr.Type,
-					"content":         tr.Content,
+					"filePath":        toolResponse.FilePath,
+					"oldString":       toolResponse.OldString,
+					"newString":       toolResponse.NewString,
+					"originalFile":    toolResponse.OriginalFile,
+					"structuredPatch": toolResponse.StructuredPatch,
+					"type":            toolResponse.Type,
+					"content":         toolResponse.Content,
 				}
 			}
-			c.trackFileChange(s.ToolName, tr)
+			c.trackFileChange(s.ToolName, toolResponse)
+		} else if len(diffs) > 0 && s.Diff == nil {
+			s.Diffs = diffs
 		}
 	})
 
@@ -983,20 +1023,6 @@ func (c *ACPClient) handleToolCallUpdate(u UpdateContent) {
 		c.toolManager.PopParent(u.ToolCallID)
 	}
 	c.emit("tool_state", state)
-}
-
-func (c *ACPClient) extractToolName(meta *MetaContent) string {
-	if meta != nil && meta.ClaudeCode != nil {
-		return meta.ClaudeCode.ToolName
-	}
-	return ""
-}
-
-func (c *ACPClient) extractToolResponse(meta *MetaContent) *ToolResponse {
-	if meta != nil && meta.ClaudeCode != nil {
-		return meta.ClaudeCode.ToolResponse
-	}
-	return nil
 }
 
 func (c *ACPClient) trackFileChange(toolName string, tr *ToolResponse) {
