@@ -30,6 +30,10 @@ export function SetMode(arg1) {
   return window['go']['main']['App']['SetMode'](arg1);
 }
 
+export function StartTerminalListeners() {
+  return window['go']['main']['App']['StartTerminalListeners']();
+}
+
 export function SubmitReview(arg1) {
   return window['go']['main']['App']['SubmitReview'](arg1);
 }

@@ -8,6 +8,7 @@
   import ModeSelector from './lib/ModeSelector.svelte';
   import PlanPanel from './lib/PlanPanel.svelte';
   import SessionSelector from './lib/SessionSelector.svelte';
+  import Terminal from './lib/Terminal.svelte';
   import { type Message, type ToolCall, type UserQuestion, type FileChange, type ReviewComment, type SessionMode, type PlanEntry, type SessionInfo, type SessionState, getStatusIndicator, getStatusClass } from './lib/shared';
   import { GetSessions, GetActiveSession, CreateSession } from '../wailsjs/go/main/App';
 
@@ -30,8 +31,8 @@
   let userAnswerInput = '';
   let expandedSubagents: Set<string> = new Set();
 
-  // Review tab state
-  let activeTab: 'chat' | 'review' = 'chat';
+  // Tab state
+  let activeTab: 'chat' | 'review' | 'terminal' = 'chat';
   let fileChanges: FileChange[] = [];
   let reviewComments: ReviewComment[] = [];
   let reviewAgentOutput = '';
@@ -381,7 +382,7 @@
         </button>
       </div>
     </div>
-    {:else}
+    {:else if activeTab === 'review'}
     <!-- Review Panel -->
     <ReviewPanel
       {fileChanges}
@@ -393,5 +394,10 @@
       on:submitReview={handleSubmitReview}
     />
     {/if}
+
+    <!-- Terminal (always mounted, hidden when not active) -->
+    <div class="{activeTab === 'terminal' ? 'flex-1' : 'h-0'} overflow-hidden">
+      <Terminal terminalId={activeSessionId || 'default'} />
+    </div>
   </div>
 </div>

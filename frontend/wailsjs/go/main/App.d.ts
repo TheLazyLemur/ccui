@@ -16,6 +16,8 @@ export function GetSessions():Promise<Array<main.SessionInfo>>;
 
 export function SetMode(arg1:string):Promise<void>;
 
+export function StartTerminalListeners():Promise<void>;
+
 export function SubmitReview(arg1:Array<main.ReviewComment>):Promise<void>;
 
 export function SwitchSession(arg1:string):Promise<void>;

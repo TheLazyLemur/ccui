@@ -3,6 +3,7 @@ module ccui
 go 1.23
 
 require (
+	github.com/creack/pty v1.1.24
 	github.com/mark3labs/mcp-go v0.27.0
 	github.com/wailsapp/wails/v2 v2.10.1
 )

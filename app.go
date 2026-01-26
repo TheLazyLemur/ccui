@@ -394,6 +394,7 @@ type App struct {
 	sessions        map[string]*SessionState
 	activeSessionID string
 	sessionMu       sync.RWMutex
+	ptyManager      *PTYManager
 }
 
 func NewApp() *App {
@@ -421,6 +422,9 @@ func (a *App) startup(ctx context.Context) {
 	runtime.EventsOn(ctx, "user_answer", a.handleUserAnswer)
 	runtime.EventsOn(ctx, "cancel", a.handleCancel)
 	runtime.EventsOn(ctx, "submit_review", a.handleSubmitReview)
+
+	// Terminal PTY support
+	a.StartTerminalListeners()
 }
 
 // CreateSession creates a new session with the given name
@@ -672,6 +676,9 @@ func mapInt(m map[string]interface{}, key string) int {
 func (a *App) shutdown(ctx context.Context) {
 	if a.mcpServer != nil {
 		a.mcpServer.Stop()
+	}
+	if a.ptyManager != nil {
+		a.ptyManager.StopAll()
 	}
 	a.sessionMu.Lock()
 	for _, s := range a.sessions {
