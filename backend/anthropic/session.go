@@ -126,7 +126,7 @@ func (s *AnthropicSession) doRequest() (string, error) {
 		return "", fmt.Errorf("marshal request: %w", err)
 	}
 
-	httpReq, err := http.NewRequestWithContext(s.ctx, "POST", apiBaseURL, bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(s.ctx, "POST", s.backend.baseURL+"/v1/messages", bytes.NewReader(body))
 	if err != nil {
 		return "", fmt.Errorf("create request: %w", err)
 	}

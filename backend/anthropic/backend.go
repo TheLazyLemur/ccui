@@ -9,14 +9,15 @@ import (
 )
 
 const (
-	defaultModel     = "claude-sonnet-4-20250514"
+	defaultModel   = "claude-sonnet-4-20250514"
 	defaultMaxTokens = 8192
-	apiBaseURL       = "https://api.anthropic.com/v1/messages"
+	defaultBaseURL = "https://api.anthropic.com"
 )
 
 // AnthropicBackend implements AgentBackend for direct Anthropic API calls
 type AnthropicBackend struct {
 	apiKey    string
+	baseURL   string
 	model     string
 	maxTokens int
 	executor  tools.ToolExecutor
@@ -26,6 +27,7 @@ type AnthropicBackend struct {
 // BackendConfig configures the Anthropic backend
 type BackendConfig struct {
 	APIKey    string
+	BaseURL   string
 	Model     string
 	MaxTokens int
 	Executor  tools.ToolExecutor
@@ -34,6 +36,10 @@ type BackendConfig struct {
 
 // NewAnthropicBackend creates a new backend with config
 func NewAnthropicBackend(cfg BackendConfig) *AnthropicBackend {
+	baseURL := cfg.BaseURL
+	if baseURL == "" {
+		baseURL = defaultBaseURL
+	}
 	model := cfg.Model
 	if model == "" {
 		model = defaultModel
@@ -44,6 +50,7 @@ func NewAnthropicBackend(cfg BackendConfig) *AnthropicBackend {
 	}
 	return &AnthropicBackend{
 		apiKey:    cfg.APIKey,
+		baseURL:   baseURL,
 		model:     model,
 		maxTokens: maxTokens,
 		executor:  cfg.Executor,

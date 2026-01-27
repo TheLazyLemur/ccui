@@ -92,6 +92,7 @@ func (a *App) startup(ctx context.Context) {
 	if apiKey := os.Getenv("ANTHROPIC_API_KEY"); apiKey != "" && a.backendType == BackendAnthropic {
 		a.anthropic = anthropic.NewAnthropicBackend(anthropic.BackendConfig{
 			APIKey:    apiKey,
+			BaseURL:   os.Getenv("ANTHROPIC_BASE_URL"),
 			Executor:  a.toolReg,
 			PermLayer: a.permLayer,
 		})
