@@ -13,9 +13,9 @@
   export let getChildTools: (parentId: string) => ToolCall[];
   export let toggleSubagent: (id: string) => void;
 
-  const dispatch = createEventDispatcher<{ permission: string }>();
+  const dispatch = createEventDispatcher<{ permission: { toolId: string; optionId: string } }>();
 
-  function respondPermission(e: CustomEvent<string>) {
+  function respondPermission(e: CustomEvent<{ toolId: string; optionId: string }>) {
     dispatch('permission', e.detail);
   }
 

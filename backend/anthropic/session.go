@@ -220,14 +220,14 @@ func (s *AnthropicSession) processStream(body io.ReadCloser) (string, error) {
 				block.textBuilder.WriteString(delta.Text)
 				s.emit(backend.Event{
 					Type: backend.EventMessageChunk,
-					Data: map[string]any{"text": delta.Text},
+					Data: delta.Text,
 				})
 			case DeltaTypeInputJSON:
 				block.jsonBuilder.WriteString(delta.PartialJSON)
 			case DeltaTypeThinking:
 				s.emit(backend.Event{
 					Type: backend.EventThoughtChunk,
-					Data: map[string]any{"text": delta.Thinking},
+					Data: delta.Thinking,
 				})
 			}
 

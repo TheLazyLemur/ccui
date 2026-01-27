@@ -311,6 +311,60 @@ data: {"type":"ping"}
 	}
 }
 
+func TestStreamReader_NoSpaceAfterColon(t *testing.T) {
+	// Kimi API sends SSE without space after colon: "event:X" instead of "event: X"
+	sseData := `event:message_start
+data:{"type":"message_start","message":{"id":"msg_kimi","type":"message","role":"assistant","content":[],"model":"kimi","stop_reason":null,"usage":{"input_tokens":10,"output_tokens":1}}}
+
+event:content_block_start
+data:{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello from Kimi"}}
+
+event:content_block_stop
+data:{"type":"content_block_stop","index":0}
+
+event:message_stop
+data:{"type":"message_stop"}
+
+`
+
+	reader := NewStreamReader(io.NopCloser(strings.NewReader(sseData)))
+
+	var events []StreamEvent
+	for {
+		ev, err := reader.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		events = append(events, ev)
+	}
+
+	if len(events) != 5 {
+		t.Fatalf("expected 5 events, got %d", len(events))
+	}
+
+	// Verify message_start parsed correctly
+	if events[0].Type != EventMessageStart {
+		t.Errorf("expected message_start, got %s", events[0].Type)
+	}
+	if events[0].MessageStart == nil || events[0].MessageStart.Message.ID != "msg_kimi" {
+		t.Error("message_start missing message data")
+	}
+
+	// Verify text delta parsed correctly
+	if events[2].Type != EventContentBlockDelta {
+		t.Errorf("expected content_block_delta, got %s", events[2].Type)
+	}
+	if events[2].ContentBlockDelta == nil || events[2].ContentBlockDelta.Delta.Text != "Hello from Kimi" {
+		t.Errorf("expected 'Hello from Kimi', got %q", events[2].ContentBlockDelta.Delta.Text)
+	}
+}
+
 func TestCollectTextDeltas(t *testing.T) {
 	sseData := `event: message_start
 data: {"type":"message_start","message":{"id":"msg_123","type":"message","role":"assistant","content":[],"model":"claude-sonnet-4-20250514","stop_reason":null,"usage":{"input_tokens":10,"output_tokens":1}}}

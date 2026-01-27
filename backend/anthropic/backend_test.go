@@ -282,8 +282,7 @@ data: {"type":"message_stop"}
 	var chunks []string
 	for ev := range eventChan {
 		if ev.Type == backend.EventMessageChunk {
-			data := ev.Data.(map[string]any)
-			chunks = append(chunks, data["text"].(string))
+			chunks = append(chunks, ev.Data.(string))
 		}
 	}
 	combined := strings.Join(chunks, "")

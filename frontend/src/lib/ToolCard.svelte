@@ -47,7 +47,7 @@
     <div class="{compact ? 'px-3 py-2' : 'px-4 py-3'} border-t border-ink-faint flex flex-wrap gap-2">
       {#each tool.permissionOptions as opt}
         <button
-          on:click={() => dispatch('permission', opt.optionId)}
+          on:click={() => dispatch('permission', { toolId: tool.id, optionId: opt.optionId })}
           class="{compact ? 'px-3 py-1 text-xs' : 'px-4 py-1.5 text-sm'} border transition-colors {getButtonClass(opt.kind)}"
         >
           {opt.name}

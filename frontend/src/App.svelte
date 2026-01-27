@@ -273,7 +273,9 @@
   }
 
   function handleKeydown(e: KeyboardEvent) { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); } }
-  function respondPermission(e: CustomEvent<string>) { EventsEmit('permission_response', e.detail); }
+  function respondPermission(e: CustomEvent<{ toolId: string; optionId: string }>) {
+    EventsEmit('permission_response', e.detail.optionId, { toolCallId: e.detail.toolId });
+  }
   function cancelRequest() { EventsEmit('cancel'); isLoading = false; }
 
   function submitUserAnswer(answer?: string) {

@@ -60,15 +60,17 @@ func (s *StreamReader) Next() (StreamEvent, error) {
 			continue
 		}
 
-		// Parse event: line
-		if strings.HasPrefix(line, "event: ") {
-			eventType = strings.TrimPrefix(line, "event: ")
+		// Parse event: line (handle both "event: X" and "event:X" formats)
+		if strings.HasPrefix(line, "event:") {
+			eventType = strings.TrimPrefix(line, "event:")
+			eventType = strings.TrimSpace(eventType)
 			continue
 		}
 
-		// Parse data: line
-		if strings.HasPrefix(line, "data: ") {
-			dataLine = strings.TrimPrefix(line, "data: ")
+		// Parse data: line (handle both "data: X" and "data:X" formats)
+		if strings.HasPrefix(line, "data:") {
+			dataLine = strings.TrimPrefix(line, "data:")
+			dataLine = strings.TrimSpace(dataLine)
 			continue
 		}
 	}
