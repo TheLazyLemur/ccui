@@ -1,46 +1,32 @@
-package main
+package acp
 
 import (
 	"bufio"
 	"encoding/json"
 	"strconv"
 	"strings"
+
+	"ccui/backend"
 )
 
+// ToolEventAdapter adapts tool events from different ACP backends
 type ToolEventAdapter interface {
 	Name() string
 	CanHandle(update UpdateContent) bool
 	ToolName(update UpdateContent) string
-	DiffBlocks(update UpdateContent) []DiffBlock
+	DiffBlocks(update UpdateContent) []backend.DiffBlock
 	ToolResponse(update UpdateContent) *ToolResponse
 }
 
-func defaultToolAdapters() []ToolEventAdapter {
+// DefaultToolAdapters returns the default set of adapters
+func DefaultToolAdapters() []ToolEventAdapter {
 	return []ToolEventAdapter{
 		ClaudeCodeAdapter{},
 		OpenCodeAdapter{},
 	}
 }
 
-func (c *ACPClient) adapterFor(update UpdateContent) ToolEventAdapter {
-	for _, adapter := range c.toolAdapters {
-		if adapter.CanHandle(update) {
-			return adapter
-		}
-	}
-	return nil
-}
-
-func resolveToolName(adapter ToolEventAdapter, update UpdateContent) string {
-	if adapter != nil {
-		name := adapter.ToolName(update)
-		if name != "" {
-			return name
-		}
-	}
-	return normalizeToolName(update.Title, update.ToolKind)
-}
-
+// ClaudeCodeAdapter handles Claude Code specific tool events
 type ClaudeCodeAdapter struct{}
 
 func (ClaudeCodeAdapter) Name() string {
@@ -58,8 +44,7 @@ func (ClaudeCodeAdapter) ToolName(update UpdateContent) string {
 	return ""
 }
 
-func (ClaudeCodeAdapter) DiffBlocks(update UpdateContent) []DiffBlock {
-	// Claude Code provides diff data via ToolResponse, not Content field
+func (ClaudeCodeAdapter) DiffBlocks(update UpdateContent) []backend.DiffBlock {
 	return nil
 }
 
@@ -70,6 +55,7 @@ func (ClaudeCodeAdapter) ToolResponse(update UpdateContent) *ToolResponse {
 	return update.Meta.ClaudeCode.ToolResponse
 }
 
+// OpenCodeAdapter handles OpenCode tool events
 type OpenCodeAdapter struct{}
 
 func (OpenCodeAdapter) Name() string {
@@ -84,7 +70,7 @@ func (OpenCodeAdapter) ToolName(update UpdateContent) string {
 	return normalizeToolName(update.Title, update.ToolKind)
 }
 
-func (OpenCodeAdapter) DiffBlocks(update UpdateContent) []DiffBlock {
+func (OpenCodeAdapter) DiffBlocks(update UpdateContent) []backend.DiffBlock {
 	return parseDiffBlocks(update.Content)
 }
 
@@ -136,7 +122,7 @@ type openCodeMeta struct {
 	filePath string
 	original string
 	current  string
-	hunks    []PatchHunk
+	hunks    []backend.PatchHunk
 }
 
 func extractOpenCodeMeta(rawOutput *ToolRawOutput) openCodeMeta {
@@ -156,13 +142,13 @@ func extractOpenCodeMeta(rawOutput *ToolRawOutput) openCodeMeta {
 	return meta
 }
 
-func firstDiffBlock(diffs []DiffBlock) DiffBlock {
+func firstDiffBlock(diffs []backend.DiffBlock) backend.DiffBlock {
 	for _, diff := range diffs {
 		if diff.Type == "diff" {
 			return diff
 		}
 	}
-	return DiffBlock{}
+	return backend.DiffBlock{}
 }
 
 func firstNonEmpty(values ...string) string {
@@ -188,18 +174,18 @@ func normalizeToolName(title, kind string) string {
 	return name
 }
 
-func parseDiffBlocks(content json.RawMessage) []DiffBlock {
+func parseDiffBlocks(content json.RawMessage) []backend.DiffBlock {
 	if len(content) == 0 || content[0] != '[' {
 		return nil
 	}
-	var diffs []DiffBlock
+	var diffs []backend.DiffBlock
 	if err := json.Unmarshal(content, &diffs); err != nil {
 		return nil
 	}
 	return diffs
 }
 
-func buildHunksFromTexts(oldText, newText string) []PatchHunk {
+func buildHunksFromTexts(oldText, newText string) []backend.PatchHunk {
 	oldLines := splitLines(oldText)
 	newLines := splitLines(newText)
 	if len(oldLines) == 0 && len(newLines) == 0 {
@@ -212,7 +198,7 @@ func buildHunksFromTexts(oldText, newText string) []PatchHunk {
 	for _, line := range newLines {
 		lines = append(lines, "+"+line)
 	}
-	return []PatchHunk{{
+	return []backend.PatchHunk{{
 		OldStart: 1,
 		OldLines: len(oldLines),
 		NewStart: 1,
@@ -221,13 +207,13 @@ func buildHunksFromTexts(oldText, newText string) []PatchHunk {
 	}}
 }
 
-func parseUnifiedDiff(diffText string) []PatchHunk {
+func parseUnifiedDiff(diffText string) []backend.PatchHunk {
 	if diffText == "" {
 		return nil
 	}
 	scanner := bufio.NewScanner(strings.NewReader(diffText))
-	var hunks []PatchHunk
-	var current *PatchHunk
+	var hunks []backend.PatchHunk
+	var current *backend.PatchHunk
 	for scanner.Scan() {
 		line := scanner.Text()
 		if strings.HasPrefix(line, "@@") {
@@ -236,7 +222,7 @@ func parseUnifiedDiff(diffText string) []PatchHunk {
 				current = nil
 				continue
 			}
-			hunk := PatchHunk{
+			hunk := backend.PatchHunk{
 				OldStart: oldStart,
 				OldLines: oldLines,
 				NewStart: newStart,
@@ -305,4 +291,15 @@ func splitLines(text string) []string {
 		return lines[:len(lines)-1]
 	}
 	return lines
+}
+
+// ResolveToolName determines the tool name using adapters
+func ResolveToolName(adapter ToolEventAdapter, update UpdateContent) string {
+	if adapter != nil {
+		name := adapter.ToolName(update)
+		if name != "" {
+			return name
+		}
+	}
+	return normalizeToolName(update.Title, update.ToolKind)
 }

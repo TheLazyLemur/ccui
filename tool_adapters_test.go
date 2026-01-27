@@ -1,15 +1,17 @@
 package main
 
 import (
+	"ccui/backend"
+	"ccui/backend/acp"
 	"encoding/json"
 	"testing"
 )
 
 func TestClaudeCodeAdapter(t *testing.T) {
-	adapter := ClaudeCodeAdapter{}
-	tr := &ToolResponse{FilePath: "/tmp/a.md", OldString: "old", NewString: "new"}
-	update := UpdateContent{
-		Meta: &MetaContent{ClaudeCode: &ClaudeCodeMeta{ToolName: "Edit", ToolResponse: tr}},
+	adapter := acp.ClaudeCodeAdapter{}
+	tr := &acp.ToolResponse{FilePath: "/tmp/a.md", OldString: "old", NewString: "new"}
+	update := acp.UpdateContent{
+		Meta: &acp.MetaContent{ClaudeCode: &acp.ClaudeCodeMeta{ToolName: "Edit", ToolResponse: tr}},
 	}
 	if !adapter.CanHandle(update) {
 		t.Fatal("expected adapter to handle claude meta")
@@ -23,19 +25,19 @@ func TestClaudeCodeAdapter(t *testing.T) {
 }
 
 func TestOpenCodeAdapterToolResponse(t *testing.T) {
-	adapter := OpenCodeAdapter{}
-	diffs := []DiffBlock{{Type: "diff", Path: "/tmp/hello.md", OldText: "old", NewText: "new"}}
+	adapter := acp.OpenCodeAdapter{}
+	diffs := []backend.DiffBlock{{Type: "diff", Path: "/tmp/hello.md", OldText: "old", NewText: "new"}}
 	content, err := json.Marshal(diffs)
 	if err != nil {
 		t.Fatalf("marshal diffs: %v", err)
 	}
-	update := UpdateContent{
+	update := acp.UpdateContent{
 		Title:    "write",
 		ToolKind: "edit",
 		Content:  content,
-		RawOutput: &ToolRawOutput{Metadata: &ToolOutputMetadata{
+		RawOutput: &acp.ToolRawOutput{Metadata: &acp.ToolOutputMetadata{
 			Diff: "@@ -1,1 +1,1 @@\n-old\n+new\n",
-			Filediff: &FileDiff{
+			Filediff: &acp.FileDiff{
 				File:   "/tmp/hello.md",
 				Before: "old",
 				After:  "new",
