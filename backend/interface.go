@@ -27,6 +27,11 @@ type SessionOpts struct {
 	CWD        string
 	MCPServers []any
 	EventChan  chan<- Event // where to send events
+
+	// Review-mode configuration
+	AutoPermission     bool             // auto-approve all permissions
+	SuppressToolEvents bool             // don't emit tool state events
+	FileChangeStore    *FileChangeStore // optional shared store
 }
 
 // Session represents an active agent session
@@ -39,6 +44,7 @@ type Session interface {
 	SessionID() string
 	CurrentMode() string
 	AvailableModes() []SessionMode
+	FileChangeStore() *FileChangeStore
 }
 
 // AgentBackend creates and manages sessions

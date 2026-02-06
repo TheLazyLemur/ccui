@@ -55,15 +55,21 @@ type ClientConfig struct {
 	EventChan          chan<- backend.Event
 	AutoPermission     bool
 	SuppressToolEvents bool
+	FileChangeStore    *backend.FileChangeStore // optional shared store
 }
 
 // NewClient creates a Client with the given transport
 func NewClient(cfg ClientConfig, opts ...ClientOption) *Client {
+	fileStore := cfg.FileChangeStore
+	if fileStore == nil {
+		fileStore = backend.NewFileChangeStore()
+	}
+
 	c := &Client{
 		transport:          cfg.Transport,
 		eventChan:          cfg.EventChan,
 		toolManager:        backend.NewToolCallManager(),
-		fileChangeStore:    backend.NewFileChangeStore(),
+		fileChangeStore:    fileStore,
 		toolAdapters:       DefaultToolAdapters(),
 		permissionRespCh:   make(chan string, 1),
 		autoPermission:     cfg.AutoPermission,

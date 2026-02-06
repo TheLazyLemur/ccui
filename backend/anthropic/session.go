@@ -27,19 +27,31 @@ type AnthropicSession struct {
 	toolManager *backend.ToolCallManager
 	fileStore   *backend.FileChangeStore
 	mu          sync.Mutex
+
+	// Review-mode configuration
+	autoPermission     bool
+	suppressToolEvents bool
 }
 
 func newAnthropicSession(ctx context.Context, b *AnthropicBackend, opts backend.SessionOpts) *AnthropicSession {
 	ctx, cancel := context.WithCancel(ctx)
+
+	fileStore := opts.FileChangeStore
+	if fileStore == nil {
+		fileStore = backend.NewFileChangeStore()
+	}
+
 	return &AnthropicSession{
-		id:          uuid.New().String(),
-		ctx:         ctx,
-		cancel:      cancel,
-		backend:     b,
-		opts:        opts,
-		history:     make([]Message, 0),
-		toolManager: backend.NewToolCallManager(),
-		fileStore:   backend.NewFileChangeStore(),
+		id:                 uuid.New().String(),
+		ctx:                ctx,
+		cancel:             cancel,
+		backend:            b,
+		opts:               opts,
+		history:            make([]Message, 0),
+		toolManager:        backend.NewToolCallManager(),
+		fileStore:          fileStore,
+		autoPermission:     opts.AutoPermission,
+		suppressToolEvents: opts.SuppressToolEvents,
 	}
 }
 
@@ -61,6 +73,11 @@ func (s *AnthropicSession) AvailableModes() []backend.SessionMode {
 // SetMode is a no-op for direct API
 func (s *AnthropicSession) SetMode(modeID string) error {
 	return nil
+}
+
+// FileChangeStore returns the file change store
+func (s *AnthropicSession) FileChangeStore() *backend.FileChangeStore {
+	return s.fileStore
 }
 
 // Cancel cancels the current operation
@@ -332,40 +349,43 @@ func (s *AnthropicSession) executeTools(content []ContentBlock) error {
 func (s *AnthropicSession) executeTool(id, name string, input map[string]any) (ContentBlock, error) {
 	inputJSON, _ := json.Marshal(input)
 
-	// Check permission
-	decision := s.backend.permLayer.Check(name, string(inputJSON))
+	// Skip permission check if auto-permission enabled
+	if !s.autoPermission {
+		// Check permission
+		decision := s.backend.permLayer.Check(name, string(inputJSON))
 
-	switch decision {
-	case permission.Deny:
-		return s.toolError(id, "Permission denied")
+		switch decision {
+		case permission.Deny:
+			return s.toolError(id, "Permission denied")
 
-	case permission.Ask:
-		// Update state to awaiting_permission
-		state := s.toolManager.Update(id, func(ts *backend.ToolState) {
-			ts.Status = "awaiting_permission"
-			ts.PermissionOptions = []backend.PermOption{
+			case permission.Ask:
+			// Update state to awaiting_permission
+			state := s.toolManager.Update(id, func(ts *backend.ToolState) {
+				ts.Status = "awaiting_permission"
+				ts.PermissionOptions = []backend.PermOption{
+					{OptionID: "allow", Name: "Allow", Kind: "allow"},
+					{OptionID: "deny", Name: "Deny", Kind: "deny"},
+				}
+			})
+			if state != nil {
+				s.emitToolState(state)
+			}
+
+			// Request permission (blocks until user responds)
+			optionID, err := s.backend.permLayer.Request(id, name, []backend.PermOption{
 				{OptionID: "allow", Name: "Allow", Kind: "allow"},
 				{OptionID: "deny", Name: "Deny", Kind: "deny"},
-			}
-		})
-		if state != nil {
-			s.emitToolState(state)
-		}
-
-		// Request permission (blocks until user responds)
-		optionID, err := s.backend.permLayer.Request(id, name, []backend.PermOption{
-			{OptionID: "allow", Name: "Allow", Kind: "allow"},
-			{OptionID: "deny", Name: "Deny", Kind: "deny"},
-		})
-		if err != nil {
-			return s.toolError(id, fmt.Sprintf("Permission request failed: %v", err))
-		}
-
-		if optionID != "allow" {
-			s.toolManager.Update(id, func(ts *backend.ToolState) {
-				ts.Status = "error"
 			})
-			return s.toolError(id, "User denied permission")
+			if err != nil {
+				return s.toolError(id, fmt.Sprintf("Permission request failed: %v", err))
+			}
+
+			if optionID != "allow" {
+				s.toolManager.Update(id, func(ts *backend.ToolState) {
+					ts.Status = "error"
+				})
+				return s.toolError(id, "User denied permission")
+			}
 		}
 	}
 
@@ -384,8 +404,8 @@ func (s *AnthropicSession) executeTool(id, name string, input map[string]any) (C
 		return s.toolError(id, fmt.Sprintf("Execution failed: %v", err))
 	}
 
-	// Track file changes
-	if result.FilePath != "" {
+	// Track file changes (only for Write/Edit tools)
+	if result.FilePath != "" && (name == "Write" || name == "Edit") {
 		s.fileStore.RecordChange(result.FilePath, result.OldContent, result.NewContent, result.Hunks)
 		s.emit(backend.Event{
 			Type: backend.EventFileChanges,
@@ -438,7 +458,7 @@ func (s *AnthropicSession) emit(ev backend.Event) {
 
 // emitToolState emits a copy of the tool state to avoid mutation issues
 func (s *AnthropicSession) emitToolState(state *backend.ToolState) {
-	if state == nil {
+	if state == nil || s.suppressToolEvents {
 		return
 	}
 	// Copy the state to avoid race conditions with later mutations

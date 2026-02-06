@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"os/exec"
 	"strings"
 	"sync"
 	"time"
@@ -26,8 +25,7 @@ type SessionInfo struct{ ID, Name, CreatedAt, ModeID string }
 type SessionState struct {
 	ID, Name  string
 	CreatedAt time.Time
-	Session   backend.Session   // unified session interface
-	Client    *acp.Client       // for ACP-specific features (file changes)
+	Session   backend.Session // unified session interface
 	EventChan chan backend.Event
 }
 
@@ -50,9 +48,9 @@ type App struct {
 
 	// backend infrastructure
 	backendType BackendType
+	backend     backend.AgentBackend // unified backend
 	permLayer   *permission.Layer
 	toolReg     *tools.Registry
-	anthropic   *anthropic.AnthropicBackend
 }
 
 func NewApp() *App {
@@ -88,15 +86,18 @@ func (a *App) startup(ctx context.Context) {
 	a.toolReg.Register(tools.NewWriteTool())
 	a.toolReg.Register(tools.NewEditTool())
 
-	// init anthropic backend if API key present
-	if apiKey := os.Getenv("ANTHROPIC_API_KEY"); apiKey != "" && a.backendType == BackendAnthropic {
-		a.anthropic = anthropic.NewAnthropicBackend(anthropic.BackendConfig{
+	apiKey := os.Getenv("ANTHROPIC_API_KEY")
+	if a.backendType == BackendAnthropic && apiKey != "" {
+		a.backend = anthropic.NewAnthropicBackend(anthropic.BackendConfig{
 			APIKey:    apiKey,
 			BaseURL:   os.Getenv("ANTHROPIC_BASE_URL"),
 			Executor:  a.toolReg,
 			PermLayer: a.permLayer,
 		})
 		slog.Info("anthropic backend initialized")
+	} else {
+		a.backend = acp.NewACPBackend(ctx, apiKey)
+		slog.Info("acp backend initialized")
 	}
 
 	wailsRuntime.EventsOn(ctx, "send_message", a.handleSendMessage)
@@ -120,27 +121,16 @@ func (a *App) CreateSession(name string) (string, error) {
 	eventPrefix := fmt.Sprintf("session:%s:", sessionID)
 	eventChan := make(chan backend.Event, 100)
 
-	var state *SessionState
-	if a.backendType == BackendAnthropic && a.anthropic != nil {
-		// anthropic backend
-		sess, err := a.anthropic.NewSession(a.ctx, backend.SessionOpts{
-			CWD:       cwd,
-			EventChan: eventChan,
-		})
-		if err != nil {
-			close(eventChan)
-			return "", fmt.Errorf("create anthropic session: %w", err)
-		}
-		state = &SessionState{ID: sessionID, Name: name, CreatedAt: time.Now(), Session: sess, EventChan: eventChan}
-	} else {
-		// acp backend (default)
-		client, err := a.createACPClient(cwd, a.getMCPServers(), eventChan, false, false)
-		if err != nil {
-			close(eventChan)
-			return "", fmt.Errorf("create ACP client: %w", err)
-		}
-		state = &SessionState{ID: sessionID, Name: name, CreatedAt: time.Now(), Session: client, Client: client, EventChan: eventChan}
+	sess, err := a.backend.NewSession(a.ctx, backend.SessionOpts{
+		CWD:        cwd,
+		MCPServers: a.getMCPServers(),
+		EventChan:  eventChan,
+	})
+	if err != nil {
+		close(eventChan)
+		return "", fmt.Errorf("create session: %w", err)
 	}
+	state := &SessionState{ID: sessionID, Name: name, CreatedAt: time.Now(), Session: sess, EventChan: eventChan}
 
 	go a.bridgeEvents(eventPrefix, eventChan, "chat_chunk")
 	a.sessionMu.Lock()
@@ -153,35 +143,6 @@ func (a *App) CreateSession(name string) (string, error) {
 		wailsRuntime.EventsEmit(a.ctx, eventPrefix+"mode_changed", state.Session.CurrentMode())
 	}
 	return sessionID, nil
-}
-
-func (a *App) createACPClient(cwd string, mcpServers []any, eventChan chan backend.Event, autoPermission, suppressToolEvents bool) (*acp.Client, error) {
-	cmd := exec.CommandContext(a.ctx, "claude-code-acp")
-	cmd.Env, cmd.Dir, cmd.Stderr = append(os.Environ(), "ANTHROPIC_API_KEY="+os.Getenv("ANTHROPIC_API_KEY")), cwd, os.Stderr
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		return nil, fmt.Errorf("stdin pipe: %w", err)
-	}
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return nil, fmt.Errorf("stdout pipe: %w", err)
-	}
-	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("start: %w", err)
-	}
-	client := acp.NewClient(acp.ClientConfig{
-		Transport: acp.NewStdioTransport(stdin, stdout), EventChan: eventChan,
-		AutoPermission: autoPermission, SuppressToolEvents: suppressToolEvents,
-	})
-	if err := client.Initialize(); err != nil {
-		cmd.Process.Kill()
-		return nil, fmt.Errorf("initialize: %w", err)
-	}
-	if err := client.NewSession(cwd, mcpServers); err != nil {
-		cmd.Process.Kill()
-		return nil, fmt.Errorf("new session: %w", err)
-	}
-	return client, nil
 }
 
 func (a *App) bridgeEvents(prefix string, eventChan <-chan backend.Event, chunkEventName string) {
@@ -277,15 +238,6 @@ func (a *App) getActiveSession() backend.Session {
 	return nil
 }
 
-func (a *App) getActiveACPClient() *acp.Client {
-	a.sessionMu.RLock()
-	defer a.sessionMu.RUnlock()
-	if state := a.sessions[a.activeSessionID]; state != nil {
-		return state.Client
-	}
-	return nil
-}
-
 func (a *App) getActiveState() *SessionState {
 	a.sessionMu.RLock()
 	defer a.sessionMu.RUnlock()
@@ -320,10 +272,12 @@ func (a *App) handleSendMessage(data ...interface{}) {
 
 func (a *App) handlePermissionResponse(data ...interface{}) {
 	if optionID, ok := firstAs[string](data); ok {
-		// ACP backend permission response
-		if client := a.getActiveACPClient(); client != nil {
-			client.RespondToPermission(optionID)
-			return
+		// ACP backend permission response (type assert to access RespondToPermission)
+		if sess := a.getActiveSession(); sess != nil {
+			if client, ok := sess.(*acp.Client); ok {
+				client.RespondToPermission(optionID)
+				return
+			}
 		}
 		// Anthropic backend permission response
 		if a.permLayer != nil {
@@ -405,10 +359,14 @@ type ReviewComment struct{ ID, Type, FilePath, Text string; LineNumber, HunkInde
 
 func (a *App) SubmitReview(comments []ReviewComment) {
 	state := a.getActiveState()
-	if state == nil || state.Client == nil {
-		return // review requires ACP client for file changes
+	if state == nil || state.Session == nil {
+		return
 	}
-	changes := state.Client.FileChangeStore().GetAll()
+	fileStore := state.Session.FileChangeStore()
+	if fileStore == nil {
+		return
+	}
+	changes := fileStore.GetAll()
 	if len(changes) == 0 && len(comments) == 0 {
 		return
 	}
@@ -418,20 +376,29 @@ func (a *App) SubmitReview(comments []ReviewComment) {
 		prompt := buildReviewPrompt(changes, comments)
 		cwd, _ := os.Getwd()
 		reviewEventChan := make(chan backend.Event, 100)
-		reviewClient, err := a.createACPClient(cwd, []any{}, reviewEventChan, true, true)
+
+		// Create review session with auto-permission and shared file store
+		reviewSession, err := a.backend.NewSession(a.ctx, backend.SessionOpts{
+			CWD:                cwd,
+			MCPServers:         []any{},
+			EventChan:          reviewEventChan,
+			AutoPermission:     true,
+			SuppressToolEvents: true,
+			FileChangeStore:    fileStore,
+		})
 		if err != nil {
 			wailsRuntime.EventsEmit(a.ctx, eventPrefix+"review_agent_chunk", "Error: "+err.Error())
 			wailsRuntime.EventsEmit(a.ctx, eventPrefix+"review_agent_complete", nil)
 			close(reviewEventChan)
 			return
 		}
-		reviewClient.SetFileChangeStore(state.Client.FileChangeStore())
+
 		go a.bridgeEvents(eventPrefix, reviewEventChan, "review_agent_chunk")
-		if err := reviewClient.SendPrompt(prompt, []string{}); err != nil {
+		if err := reviewSession.SendPrompt(prompt, []string{}); err != nil {
 			wailsRuntime.EventsEmit(a.ctx, eventPrefix+"review_agent_chunk", "\nError: "+err.Error())
 		}
 		wailsRuntime.EventsEmit(a.ctx, eventPrefix+"review_agent_complete", nil)
-		go func() { reviewClient.Close(); close(reviewEventChan) }()
+		go func() { reviewSession.Close(); close(reviewEventChan) }()
 	}()
 }
 
