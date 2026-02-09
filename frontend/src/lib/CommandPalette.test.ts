@@ -24,7 +24,7 @@ describe('CommandPalette', () => {
     it('renders all options by default', () => {
       const { container } = render(CommandPalette);
       const options = container.querySelectorAll('[data-testid^="palette-option-"]');
-      expect(options.length).toBe(4);
+      expect(options.length).toBe(5);
     });
 
     it('input has autofocus for focus on mount', () => {
@@ -118,8 +118,8 @@ describe('CommandPalette', () => {
       const { container } = render(CommandPalette);
       const input = container.querySelector('input[data-testid="palette-input"]') as HTMLInputElement;
 
-      // Move to last option (4 options total)
-      for (let i = 0; i < 4; i++) {
+      // Move to last option (5 options total)
+      for (let i = 0; i < 5; i++) {
         await fireEvent.keyDown(input, { key: 'ArrowDown' });
         await tick();
       }
@@ -136,7 +136,7 @@ describe('CommandPalette', () => {
       await tick();
 
       const options = container.querySelectorAll('[data-testid^="palette-option-"]');
-      expect(options[3].classList.contains('selected')).toBe(true);
+      expect(options[4].classList.contains('selected')).toBe(true);
     });
 
     it('Enter confirms selection', async () => {

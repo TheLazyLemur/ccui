@@ -58,3 +58,37 @@ func TestPermissionRules_UnknownToolDenied(t *testing.T) {
 	decision := rules.Check("UnknownTool", "any input")
 	a.Equal(Deny, decision, "unknown tools should be denied")
 }
+
+func TestPermissionRules_ReadOnly(t *testing.T) {
+	a := assert.New(t)
+	rules := ReadOnlyRules()
+
+	// read tools allowed
+	for _, tool := range []string{"Read", "Glob", "Grep", "WebSearch", "WebFetch"} {
+		a.Equal(Allow, rules.Check(tool, ""), "tool %s should be allowed", tool)
+	}
+	// write tools denied
+	for _, tool := range []string{"Write", "Edit", "NotebookEdit", "Bash"} {
+		a.Equal(Deny, rules.Check(tool, ""), "tool %s should be denied", tool)
+	}
+	// unknown denied
+	a.Equal(Deny, rules.Check("Unknown", ""))
+}
+
+func TestPermissionRules_WorkspaceWrite(t *testing.T) {
+	a := assert.New(t)
+	rules := WorkspaceWriteRules()
+
+	// read tools allowed
+	for _, tool := range []string{"Read", "Glob", "Grep", "WebSearch", "WebFetch"} {
+		a.Equal(Allow, rules.Check(tool, ""), "tool %s should be allowed", tool)
+	}
+	// write/edit allowed
+	for _, tool := range []string{"Write", "Edit", "NotebookEdit"} {
+		a.Equal(Allow, rules.Check(tool, ""), "tool %s should be allowed", tool)
+	}
+	// bash denied
+	a.Equal(Deny, rules.Check("Bash", ""))
+	// unknown denied
+	a.Equal(Deny, rules.Check("Unknown", ""))
+}

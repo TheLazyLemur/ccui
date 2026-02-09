@@ -82,6 +82,38 @@ export interface PlanEntry {
   status: 'pending' | 'in_progress' | 'completed';
 }
 
+// Automation types
+
+export type PermissionLevel = 'read_only' | 'workspace_write' | 'full_access';
+
+export interface Automation {
+  id: string;
+  name: string;
+  prompt: string;
+  schedule: string;
+  projectDir: string;
+  backendType: string;
+  permissionLevel: PermissionLevel;
+  enabled: boolean;
+  useWorktree: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type RunStatus = 'running' | 'completed' | 'failed';
+
+export interface AutomationRun {
+  id: string;
+  automationId: string;
+  status: RunStatus;
+  startedAt: string;
+  completedAt?: string;
+  output?: string;
+  error?: string;
+  hasFindings: boolean;
+  read: boolean;
+}
+
 const STATUS_INDICATORS: Record<string, string> = {
   pending: '○', awaiting_permission: '◇', running: '◎', completed: '●', error: '✕'
 };

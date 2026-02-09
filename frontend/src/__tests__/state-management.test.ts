@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import type { SessionInfo } from '../lib/shared';
 
 // Types matching shared.ts
 interface ToolCall {
@@ -632,5 +633,61 @@ describe('Message ID Generation', () => {
 
     // Session 1 should have IDs 1, 2
     expect(manager.messages.map(m => m.id)).toEqual([1, 2]);
+  });
+});
+
+describe('SessionInfo field casing contract', () => {
+  // Wails serialises Go structs using json tags (or field names if no tags).
+  // The Go SessionInfo struct must produce camelCase keys that match shared.ts.
+  // This test simulates the data Wails sends and verifies the frontend interface works.
+
+  it('sessions_updated event data has accessible id and name fields', () => {
+    // Simulate what GetSessions / sessions_updated returns from Go
+    // After fix, Go should send camelCase keys via json tags
+    const goPayload = [
+      { id: 'session-1', name: 'My Session', createdAt: '2025-01-01T00:00:00Z', modeId: 'code' },
+      { id: 'session-2', name: 'Debug', createdAt: '2025-01-02T00:00:00Z', modeId: '' },
+    ];
+
+    const sessions: SessionInfo[] = goPayload;
+
+    expect(sessions[0].id).toBe('session-1');
+    expect(sessions[0].name).toBe('My Session');
+    expect(sessions[0].createdAt).toBe('2025-01-01T00:00:00Z');
+    expect(sessions[0].modeId).toBe('code');
+
+    expect(sessions[1].id).toBe('session-2');
+    expect(sessions[1].name).toBe('Debug');
+  });
+
+  it('SessionSelector find logic works with correct casing', () => {
+    const sessions: SessionInfo[] = [
+      { id: 'session-1', name: 'First', createdAt: '', modeId: '' },
+      { id: 'session-2', name: 'Second', createdAt: '', modeId: '' },
+    ];
+    const activeSessionId = 'session-1';
+
+    // This mirrors SessionSelector.svelte line 47
+    const currentSession = sessions.find(s => s.id === activeSessionId);
+    expect(currentSession).toBeDefined();
+    expect(currentSession?.name).toBe('First');
+
+    // This mirrors SessionSelector.svelte line 55: {currentSession?.name || 'Session'}
+    const displayName = currentSession?.name || 'Session';
+    expect(displayName).toBe('First');
+  });
+
+  it('PascalCase data from Go without json tags causes undefined fields', () => {
+    // This is what Wails CURRENTLY sends (Go struct without json tags)
+    const goPayloadBroken = { ID: 'session-1', Name: 'My Session', CreatedAt: '2025-01-01T00:00:00Z', ModeID: 'code' };
+
+    // Cast as SessionInfo to simulate the runtime mismatch
+    const session = goPayloadBroken as unknown as SessionInfo;
+
+    // These are undefined because the keys are PascalCase but interface expects camelCase
+    expect(session.id).toBeUndefined();
+    expect(session.name).toBeUndefined();
+    expect(session.createdAt).toBeUndefined();
+    expect(session.modeId).toBeUndefined();
   });
 });

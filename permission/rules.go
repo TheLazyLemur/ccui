@@ -22,6 +22,35 @@ func (r *RuleSet) Check(tool, input string) Decision {
 	return Deny
 }
 
+// ReadOnlyRules allows only observation tools, denies everything else
+func ReadOnlyRules() *RuleSet {
+	return &RuleSet{
+		rules: map[string]Decision{
+			"Read":      Allow,
+			"Glob":      Allow,
+			"Grep":      Allow,
+			"WebSearch": Allow,
+			"WebFetch":  Allow,
+		},
+	}
+}
+
+// WorkspaceWriteRules allows read + file write/edit, denies bash and unknown
+func WorkspaceWriteRules() *RuleSet {
+	return &RuleSet{
+		rules: map[string]Decision{
+			"Read":         Allow,
+			"Glob":         Allow,
+			"Grep":         Allow,
+			"WebSearch":    Allow,
+			"WebFetch":     Allow,
+			"Write":        Allow,
+			"Edit":         Allow,
+			"NotebookEdit": Allow,
+		},
+	}
+}
+
 // DefaultRules returns standard permission rules
 func DefaultRules() *RuleSet {
 	return &RuleSet{

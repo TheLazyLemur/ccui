@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
+	"ccui/automation"
 	"ccui/backend"
 	"ccui/backend/acp"
 	"ccui/backend/anthropic"
@@ -20,7 +22,12 @@ import (
 
 type SessionMode = backend.SessionMode // Wails binding compatibility
 
-type SessionInfo struct{ ID, Name, CreatedAt, ModeID string }
+type SessionInfo struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	CreatedAt string `json:"createdAt"`
+	ModeID    string `json:"modeId"`
+}
 
 type SessionState struct {
 	ID, Name  string
@@ -51,6 +58,12 @@ type App struct {
 	backend     backend.AgentBackend // unified backend
 	permLayer   *permission.Layer
 	toolReg     *tools.Registry
+
+	// automations
+	automationStore *automation.Store
+	runStore        *automation.RunStore
+	engine          *automation.Engine
+	scheduler       *automation.Scheduler
 }
 
 func NewApp() *App {
@@ -100,6 +113,27 @@ func (a *App) startup(ctx context.Context) {
 		slog.Info("acp backend initialized")
 	}
 
+	// init automation infrastructure
+	homeDir, _ := os.UserHomeDir()
+	automationDir := filepath.Join(homeDir, ".ccui", "automations")
+	if store, err := automation.NewStore(automationDir); err != nil {
+		slog.Error("failed to init automation store", "error", err)
+	} else {
+		a.automationStore = store
+	}
+	if rs, err := automation.NewRunStore(filepath.Join(automationDir, "runs")); err != nil {
+		slog.Error("failed to init run store", "error", err)
+	} else {
+		a.runStore = rs
+	}
+	if a.automationStore != nil && a.runStore != nil {
+		emitter := &wailsEmitter{ctx: ctx}
+		skillStore := automation.NewSkillStore(filepath.Join(homeDir, ".ccui", "skills"))
+		a.engine = automation.NewEngine(a.backendFactory(ctx), a.runStore, emitter, skillStore)
+		a.scheduler = automation.NewScheduler(ctx, a.automationStore, a.engine)
+		a.scheduler.Start()
+	}
+
 	wailsRuntime.EventsOn(ctx, "send_message", a.handleSendMessage)
 	wailsRuntime.EventsOn(ctx, "permission_response", a.handlePermissionResponse)
 	wailsRuntime.EventsOn(ctx, "user_answer", a.handleUserAnswer)
@@ -107,6 +141,32 @@ func (a *App) startup(ctx context.Context) {
 	wailsRuntime.EventsOn(ctx, "submit_review", a.handleSubmitReview)
 	a.StartTerminalListeners()
 }
+
+// backendFactory returns a function that creates backends for automation runs
+func (a *App) backendFactory(ctx context.Context) automation.BackendFactory {
+	return func(backendType string) (backend.AgentBackend, error) {
+		apiKey := os.Getenv("ANTHROPIC_API_KEY")
+		switch BackendType(backendType) {
+		case BackendAnthropic:
+			if apiKey == "" {
+				return nil, fmt.Errorf("ANTHROPIC_API_KEY required for anthropic backend")
+			}
+			return anthropic.NewAnthropicBackend(anthropic.BackendConfig{
+				APIKey:    apiKey,
+				BaseURL:   os.Getenv("ANTHROPIC_BASE_URL"),
+				Executor:  a.toolReg,
+				PermLayer: permission.NewLayer(permission.DefaultRules(), &noopEmitter{}),
+			}), nil
+		default:
+			return acp.NewACPBackend(ctx, apiKey), nil
+		}
+	}
+}
+
+// noopEmitter for automation permission layers
+type noopEmitter struct{}
+
+func (n *noopEmitter) Emit(string, any) {}
 
 // wailsEmitter adapts wails runtime to permission.EventEmitter
 type wailsEmitter struct{ ctx context.Context }
@@ -316,6 +376,9 @@ func (a *App) handleSubmitReview(data ...interface{}) {
 }
 
 func (a *App) shutdown(ctx context.Context) {
+	if a.scheduler != nil {
+		a.scheduler.Stop()
+	}
 	if a.mcpServer != nil {
 		a.mcpServer.Stop()
 	}
@@ -463,4 +526,120 @@ func firstAs[T any](data []interface{}) (T, bool) {
 	}
 	v, ok := data[0].(T)
 	return v, ok
+}
+
+// Automation CRUD bindings
+
+func (a *App) ListAutomations() []automation.Automation {
+	if a.automationStore == nil {
+		return nil
+	}
+	return a.automationStore.List()
+}
+
+func (a *App) GetAutomation(id string) (*automation.Automation, error) {
+	if a.automationStore == nil {
+		return nil, fmt.Errorf("automation store not initialized")
+	}
+	return a.automationStore.Get(id)
+}
+
+func (a *App) CreateAutomation(auto automation.Automation) (*automation.Automation, error) {
+	if a.automationStore == nil {
+		return nil, fmt.Errorf("automation store not initialized")
+	}
+	result, err := a.automationStore.Create(auto)
+	if err == nil && a.scheduler != nil {
+		a.scheduler.Sync()
+	}
+	return result, err
+}
+
+func (a *App) UpdateAutomation(auto automation.Automation) (*automation.Automation, error) {
+	if a.automationStore == nil {
+		return nil, fmt.Errorf("automation store not initialized")
+	}
+	result, err := a.automationStore.Update(auto)
+	if err == nil && a.scheduler != nil {
+		a.scheduler.Sync()
+	}
+	return result, err
+}
+
+func (a *App) DeleteAutomation(id string) error {
+	if a.automationStore == nil {
+		return fmt.Errorf("automation store not initialized")
+	}
+	err := a.automationStore.Delete(id)
+	if err == nil && a.scheduler != nil {
+		a.scheduler.Sync()
+	}
+	return err
+}
+
+// RunAutomationNow triggers immediate execution
+func (a *App) RunAutomationNow(id string) error {
+	if a.automationStore == nil || a.engine == nil {
+		return fmt.Errorf("automation infrastructure not initialized")
+	}
+	auto, err := a.automationStore.Get(id)
+	if err != nil {
+		return err
+	}
+	go func() {
+		if _, err := a.engine.Execute(a.ctx, *auto); err != nil {
+			slog.Error("manual automation run failed", "id", id, "error", err)
+		}
+	}()
+	return nil
+}
+
+// GetAutomationRuns returns runs for an automation
+func (a *App) GetAutomationRuns(automationID string) ([]automation.Run, error) {
+	if a.runStore == nil {
+		return nil, fmt.Errorf("run store not initialized")
+	}
+	return a.runStore.ListByAutomation(automationID)
+}
+
+// CancelAutomationRun stops a running automation
+func (a *App) CancelAutomationRun(runID string) {
+	if a.engine != nil {
+		a.engine.CancelRun(runID)
+	}
+}
+
+// GetTriageItems returns unread runs with findings
+func (a *App) GetTriageItems() ([]automation.Run, error) {
+	if a.runStore == nil {
+		return nil, fmt.Errorf("run store not initialized")
+	}
+	return a.runStore.UnreadWithFindings()
+}
+
+// MarkRunRead marks a run as read
+func (a *App) MarkRunRead(automationID, runID string) error {
+	if a.runStore == nil {
+		return fmt.Errorf("run store not initialized")
+	}
+	run, err := a.runStore.Get(automationID, runID)
+	if err != nil {
+		return err
+	}
+	run.Read = true
+	return a.runStore.Update(*run)
+}
+
+// GetRunDetail returns full run details
+func (a *App) GetRunDetail(automationID, runID string) (*automation.Run, error) {
+	if a.runStore == nil {
+		return nil, fmt.Errorf("run store not initialized")
+	}
+	return a.runStore.Get(automationID, runID)
+}
+
+func (a *App) BrowseDirectory() (string, error) {
+	return wailsRuntime.OpenDirectoryDialog(a.ctx, wailsRuntime.OpenDialogOptions{
+		Title: "Select Project Directory",
+	})
 }

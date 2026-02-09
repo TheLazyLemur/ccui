@@ -1,7 +1,7 @@
 <script lang="ts">
   import { createEventDispatcher, onMount } from 'svelte';
 
-  type OptionType = 'chat' | 'review' | 'terminal' | null;
+  type OptionType = 'chat' | 'review' | 'terminal' | 'automations' | null;
 
   interface Option {
     id: string;
@@ -13,6 +13,7 @@
     { id: 'chat', label: 'Chat', value: 'chat' },
     { id: 'review', label: 'Review', value: 'review' },
     { id: 'terminal', label: 'Terminal', value: 'terminal' },
+    { id: 'automations', label: 'Automations', value: 'automations' },
     { id: 'close', label: 'Close Panel', value: null },
   ];
 

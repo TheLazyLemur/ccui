@@ -1,3 +1,68 @@
+export namespace automation {
+	
+	export class Automation {
+	    id: string;
+	    name: string;
+	    prompt: string;
+	    schedule: string;
+	    projectDir: string;
+	    backendType: string;
+	    permissionLevel: string;
+	    enabled: boolean;
+	    useWorktree: boolean;
+	    createdAt: string;
+	    updatedAt: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new Automation(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.name = source["name"];
+	        this.prompt = source["prompt"];
+	        this.schedule = source["schedule"];
+	        this.projectDir = source["projectDir"];
+	        this.backendType = source["backendType"];
+	        this.permissionLevel = source["permissionLevel"];
+	        this.enabled = source["enabled"];
+	        this.useWorktree = source["useWorktree"];
+	        this.createdAt = source["createdAt"];
+	        this.updatedAt = source["updatedAt"];
+	    }
+	}
+	export class Run {
+	    id: string;
+	    automationId: string;
+	    status: string;
+	    startedAt: string;
+	    completedAt?: string;
+	    output?: string;
+	    error?: string;
+	    hasFindings: boolean;
+	    read: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new Run(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.automationId = source["automationId"];
+	        this.status = source["status"];
+	        this.startedAt = source["startedAt"];
+	        this.completedAt = source["completedAt"];
+	        this.output = source["output"];
+	        this.error = source["error"];
+	        this.hasFindings = source["hasFindings"];
+	        this.read = source["read"];
+	    }
+	}
+
+}
+
 export namespace backend {
 	
 	export class SessionMode {
@@ -44,10 +109,10 @@ export namespace main {
 	    }
 	}
 	export class SessionInfo {
-	    ID: string;
-	    Name: string;
-	    CreatedAt: string;
-	    ModeID: string;
+	    id: string;
+	    name: string;
+	    createdAt: string;
+	    modeId: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new SessionInfo(source);
@@ -55,10 +120,10 @@ export namespace main {
 	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.ID = source["ID"];
-	        this.Name = source["Name"];
-	        this.CreatedAt = source["CreatedAt"];
-	        this.ModeID = source["ModeID"];
+	        this.id = source["id"];
+	        this.name = source["name"];
+	        this.createdAt = source["createdAt"];
+	        this.modeId = source["modeId"];
 	    }
 	}
 

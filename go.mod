@@ -7,6 +7,7 @@ require (
 	github.com/creack/pty v1.1.24
 	github.com/google/uuid v1.6.0
 	github.com/mark3labs/mcp-go v0.27.0
+	github.com/robfig/cron/v3 v3.0.1
 	github.com/stretchr/testify v1.10.0
 	github.com/wailsapp/wails/v2 v2.10.1
 )

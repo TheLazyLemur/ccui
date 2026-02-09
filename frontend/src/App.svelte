@@ -8,8 +8,9 @@
   import SplitPane from './lib/SplitPane.svelte';
   import CommandPalette from './lib/CommandPalette.svelte';
   import ChatContent from './lib/ChatContent.svelte';
+  import AutomationsPanel from './lib/AutomationsPanel.svelte';
   import { type Message, type ToolCall, type UserQuestion, type FileChange, type ReviewComment, type SessionMode, type PlanEntry, type SessionInfo, type SessionState } from './lib/shared';
-  import { GetSessions, GetActiveSession, CreateSession } from '../wailsjs/go/main/App';
+  import { GetSessions, GetActiveSession, CreateSession, GetTriageItems } from '../wailsjs/go/main/App';
 
   // Multi-session state
   let sessions: SessionInfo[] = [];
@@ -30,7 +31,7 @@
   let expandedSubagents: Set<string> = new Set();
 
   // Panel state (replaces tab state)
-  type PanelType = 'chat' | 'review' | 'terminal' | null;
+  type PanelType = 'chat' | 'review' | 'terminal' | 'automations' | null;
   let leftPanel: PanelType = 'chat';
   let rightPanel: PanelType = 'terminal';
   let splitSize = 50;
@@ -47,6 +48,9 @@
   let availableModes: SessionMode[] = [];
   let currentModeId = '';
   let planEntries: PlanEntry[] = [];
+
+  // Automation triage
+  let triageCount = 0;
 
   function getOrCreateSessionState(id: string): SessionState {
     if (!sessionStates.has(id)) {
@@ -238,6 +242,10 @@
     // User question is global (handled by MCP server)
     EventsOn('user_question', (q: UserQuestion) => { userQuestion = q; userAnswerInput = ''; });
 
+    // Automation triage
+    EventsOn('automations:triage_updated', (count: number) => { triageCount = count; });
+    GetTriageItems().then(items => { triageCount = items?.length || 0; }).catch(() => {});
+
     // Initialize: fetch existing sessions or create first one
     const existingSessions = await GetSessions();
     if (existingSessions.length > 0) {
@@ -374,7 +382,11 @@
                 on:submitReview={handleSubmitReview}
               />
             {:else if leftPanel === 'terminal'}
-              <Terminal terminalId={activeSessionId || 'default'} />
+              <div class="h-full w-full origin-top-left" style="zoom: {1/fontScale}; width: {fontScale * 100}%; height: {fontScale * 100}%">
+                <Terminal terminalId={activeSessionId || 'default'} />
+              </div>
+            {:else if leftPanel === 'automations'}
+              <AutomationsPanel {triageCount} />
             {:else}
               <div class="h-full flex flex-col items-center justify-center text-ink-muted">
                 <p class="text-sm">Press <kbd class="px-1.5 py-0.5 border border-ink-faint text-xs">Cmd+K</kbd> to open panel</p>
@@ -417,7 +429,11 @@
                   on:submitReview={handleSubmitReview}
                 />
               {:else if rightPanel === 'terminal'}
-                <Terminal terminalId={activeSessionId || 'default'} />
+                <div class="h-full w-full origin-top-left" style="zoom: {1/fontScale}; width: {fontScale * 100}%; height: {fontScale * 100}%">
+                  <Terminal terminalId={activeSessionId || 'default'} />
+                </div>
+              {:else if rightPanel === 'automations'}
+                <AutomationsPanel {triageCount} />
               {:else}
                 <div class="h-full flex flex-col items-center justify-center text-ink-muted">
                   <p class="text-sm">Press <kbd class="px-1.5 py-0.5 border border-ink-faint text-xs">Cmd+K</kbd> to open panel</p>
