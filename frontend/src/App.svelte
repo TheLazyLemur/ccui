@@ -340,8 +340,6 @@
     splitSize = e.detail;
   }
 
-  // Check if any panel has chat (for showing input)
-  $: hasChatPanel = leftPanel === 'chat' || rightPanel === 'chat';
 </script>
 
 <div class="h-full bg-paper paper-texture" style="zoom: {fontScale}">
@@ -379,17 +377,31 @@
           <!-- Left Panel Content -->
           <div class="flex-1 overflow-hidden">
             {#if leftPanel === 'chat'}
-              <ChatContent
-                bind:this={leftChatRef}
-                {messages}
-                {currentChunk}
-                {currentThought}
-                {planEntries}
-                {expandedSubagents}
-                {getChildTools}
-                {toggleSubagent}
-                on:permission={respondPermission}
-              />
+              <div class="h-full flex flex-col">
+                <div class="flex-1 overflow-hidden">
+                  <ChatContent
+                    bind:this={leftChatRef}
+                    {messages}
+                    {currentChunk}
+                    {currentThought}
+                    {planEntries}
+                    {expandedSubagents}
+                    {getChildTools}
+                    {toggleSubagent}
+                    on:permission={respondPermission}
+                  />
+                </div>
+                {#if focusedPanel === 'left' || rightPanel !== 'chat'}
+                  <div class="px-4 py-3 border-t border-ink-faint">
+                    <div class="flex gap-3 items-end">
+                      <textarea bind:this={textarea} bind:value={inputText} on:keydown={handleKeydown} on:input={autoResize} placeholder="Write a message..." rows="1" disabled={isLoading} class="flex-1 px-4 py-3 bg-paper border border-ink-faint text-ink text-[15px] placeholder-ink-muted resize-none leading-normal focus:outline-none focus:border-ink-muted transition-colors disabled:opacity-50"></textarea>
+                      <button on:click={sendMessage} disabled={isLoading} class="px-5 py-3 bg-ink text-paper text-sm hover:bg-ink-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
+                        {#if isLoading}<span class="inline-block animate-spin-slow">◎</span>{:else}Send{/if}
+                      </button>
+                    </div>
+                  </div>
+                {/if}
+              </div>
             {:else if leftPanel === 'review'}
               <ReviewPanel
                 {fileChanges}
@@ -427,17 +439,31 @@
             <!-- Right Panel Content -->
             <div class="flex-1 overflow-hidden">
               {#if rightPanel === 'chat'}
-                <ChatContent
-                  bind:this={rightChatRef}
-                  {messages}
-                  {currentChunk}
-                  {currentThought}
-                  {planEntries}
-                  {expandedSubagents}
-                  {getChildTools}
-                  {toggleSubagent}
-                  on:permission={respondPermission}
-                />
+                <div class="h-full flex flex-col">
+                  <div class="flex-1 overflow-hidden">
+                    <ChatContent
+                      bind:this={rightChatRef}
+                      {messages}
+                      {currentChunk}
+                      {currentThought}
+                      {planEntries}
+                      {expandedSubagents}
+                      {getChildTools}
+                      {toggleSubagent}
+                      on:permission={respondPermission}
+                    />
+                  </div>
+                  {#if focusedPanel === 'right' || leftPanel !== 'chat'}
+                    <div class="px-4 py-3 border-t border-ink-faint">
+                      <div class="flex gap-3 items-end">
+                        <textarea bind:this={textarea} bind:value={inputText} on:keydown={handleKeydown} on:input={autoResize} placeholder="Write a message..." rows="1" disabled={isLoading} class="flex-1 px-4 py-3 bg-paper border border-ink-faint text-ink text-[15px] placeholder-ink-muted resize-none leading-normal focus:outline-none focus:border-ink-muted transition-colors disabled:opacity-50"></textarea>
+                        <button on:click={sendMessage} disabled={isLoading} class="px-5 py-3 bg-ink text-paper text-sm hover:bg-ink-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
+                          {#if isLoading}<span class="inline-block animate-spin-slow">◎</span>{:else}Send{/if}
+                        </button>
+                      </div>
+                    </div>
+                  {/if}
+                </div>
               {:else if rightPanel === 'review'}
                 <ReviewPanel
                   {fileChanges}
@@ -496,16 +522,5 @@
       <CommandPalette on:select={handlePaletteSelect} on:close={handlePaletteClose} />
     {/if}
 
-    <!-- Input (shared, visible when chat panel exists) -->
-    {#if hasChatPanel}
-      <div class="px-6 py-4 border-t border-ink-faint relative z-10">
-        <div class="flex gap-3 items-end">
-          <textarea bind:this={textarea} bind:value={inputText} on:keydown={handleKeydown} on:input={autoResize} placeholder="Write a message..." rows="1" disabled={isLoading} class="flex-1 px-4 py-3 bg-paper border border-ink-faint text-ink text-[15px] placeholder-ink-muted resize-none leading-normal focus:outline-none focus:border-ink-muted transition-colors disabled:opacity-50"></textarea>
-          <button on:click={sendMessage} disabled={isLoading} class="px-5 py-3 bg-ink text-paper text-sm hover:bg-ink-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
-            {#if isLoading}<span class="inline-block animate-spin-slow">◎</span>{:else}Send{/if}
-          </button>
-        </div>
-      </div>
-    {/if}
   </div>
 </div>

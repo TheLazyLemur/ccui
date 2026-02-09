@@ -249,3 +249,16 @@ body {
   text-decoration-thickness: 2px;
 }
 
+:root.dark .prose-eink :where(strong, b) {
+  color: var(--color-ink);
+}
+:root.dark .prose-eink :where(h1, h2, h3, h4, h5, h6) {
+  color: var(--color-ink);
+}
+:root.dark .prose-eink :where(code) {
+  color: var(--color-ink);
+}
+:root.dark .prose-eink :where(a) {
+  color: var(--color-ink);
+}
+

@@ -45,7 +45,7 @@
     {/if}
 
     {#if run.output}
-      <div class="prose prose-sm text-ink border border-ink-faint p-4">
+      <div class="prose prose-sm prose-eink border border-ink-faint p-4">
         {@html renderedOutput}
       </div>
     {:else}
