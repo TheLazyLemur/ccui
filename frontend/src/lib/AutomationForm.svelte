@@ -11,7 +11,7 @@
   let prompt = automation?.prompt ?? '';
   let schedule = automation?.schedule ?? '';
   let projectDir = automation?.projectDir ?? '';
-  let backendType = automation?.backendType ?? 'acp';
+  let backendType = automation?.backendType ?? 'anthropic';
   let permissionLevel: PermissionLevel = automation?.permissionLevel ?? 'read_only';
   let enabled = automation?.enabled ?? true;
   let useWorktree = automation?.useWorktree ?? false;
@@ -87,7 +87,6 @@
     <div class="space-y-1">
       <label for="auto-backend" class="text-xs text-ink-muted uppercase tracking-wide">Backend</label>
       <select id="auto-backend" bind:value={backendType} class="w-full px-3 py-2 bg-paper border border-ink-faint text-ink text-sm focus:outline-none focus:border-ink-muted">
-        <option value="acp">ACP (claude-code-acp)</option>
         <option value="anthropic">Anthropic API</option>
       </select>
     </div>

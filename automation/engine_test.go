@@ -101,7 +101,7 @@ func TestEngine_Execute_Success(t *testing.T) {
 		Name:            "test",
 		Prompt:          "review code",
 		ProjectDir:      t.TempDir(),
-		BackendType:     "acp",
+		BackendType:     "anthropic",
 		PermissionLevel: PermReadOnly,
 	}
 
@@ -132,7 +132,7 @@ func TestEngine_Execute_EmptyOutput(t *testing.T) {
 		ID:              "auto-1",
 		Prompt:          "check things",
 		ProjectDir:      t.TempDir(),
-		BackendType:     "acp",
+		BackendType:     "anthropic",
 		PermissionLevel: PermReadOnly,
 	}
 
@@ -152,7 +152,7 @@ func TestEngine_Execute_SendError(t *testing.T) {
 		ID:              "auto-1",
 		Prompt:          "review",
 		ProjectDir:      t.TempDir(),
-		BackendType:     "acp",
+		BackendType:     "anthropic",
 		PermissionLevel: PermReadOnly,
 	}
 

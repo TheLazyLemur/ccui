@@ -43,7 +43,7 @@ func TestStore_CreateAndGet(t *testing.T) {
 		Prompt:          "review recent changes",
 		Schedule:        "0 9 * * *",
 		ProjectDir:      "/tmp/project",
-		BackendType:     "acp",
+		BackendType:     "anthropic",
 		PermissionLevel: PermReadOnly,
 		Enabled:         true,
 	})
