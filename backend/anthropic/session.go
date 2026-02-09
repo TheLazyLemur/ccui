@@ -11,6 +11,7 @@ import (
 	"sync"
 
 	"ccui/backend"
+	"ccui/backend/tools"
 	"ccui/permission"
 
 	"github.com/google/uuid"
@@ -101,6 +102,9 @@ func (s *AnthropicSession) SendPrompt(text string, allowedTools []string) error 
 	})
 	s.mu.Unlock()
 
+	// Get all tools (local + MCP providers)
+	allTools := s.backend.getAllTools()
+
 	// Tool loop
 	for {
 		select {
@@ -109,7 +113,7 @@ func (s *AnthropicSession) SendPrompt(text string, allowedTools []string) error 
 		default:
 		}
 
-		stopReason, err := s.doRequest()
+		stopReason, err := s.doRequest(allTools)
 		if err != nil {
 			return err
 		}
@@ -127,13 +131,13 @@ func (s *AnthropicSession) SendPrompt(text string, allowedTools []string) error 
 }
 
 // doRequest makes a single API request and processes the response
-func (s *AnthropicSession) doRequest() (string, error) {
+func (s *AnthropicSession) doRequest(tools []Tool) (string, error) {
 	s.mu.Lock()
 	req := MessagesRequest{
 		Model:     s.backend.model,
 		Messages:  s.history,
 		MaxTokens: s.backend.maxTokens,
-		Tools:     DefaultTools(),
+		Tools:     tools,
 		Stream:    true,
 	}
 	s.mu.Unlock()
@@ -395,8 +399,8 @@ func (s *AnthropicSession) executeTool(id, name string, input map[string]any) (C
 	})
 	s.emitToolState(s.toolManager.Get(id))
 
-	// Execute the tool
-	result, err := s.backend.executor.Execute(s.ctx, name, input)
+	// Execute the tool (local or MCP)
+	result, err := s.executeWithProvider(name, input)
 	if err != nil {
 		s.toolManager.Update(id, func(ts *backend.ToolState) {
 			ts.Status = "error"
@@ -476,4 +480,15 @@ func (s *AnthropicSession) emitToolState(state *backend.ToolState) {
 		PermissionOptions: state.PermissionOptions,
 	}
 	s.emit(backend.Event{Type: backend.EventToolState, Data: copy})
+}
+
+// executeWithProvider executes a tool using the appropriate provider (local or MCP)
+func (s *AnthropicSession) executeWithProvider(name string, input map[string]any) (tools.ToolResult, error) {
+	// Check if this is an MCP tool
+	if provider := s.backend.findProvider(name); provider != nil {
+		return provider.Execute(s.ctx, name, input)
+	}
+
+	// Fall back to local executor
+	return s.backend.executor.Execute(s.ctx, name, input)
 }

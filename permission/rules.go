@@ -19,6 +19,10 @@ func (r *RuleSet) Check(tool, input string) Decision {
 	if d, ok := r.rules[tool]; ok {
 		return d
 	}
+	// MCP tools auto-allow (they run through their own server)
+	if len(tool) > 5 && tool[:5] == "mcp__" {
+		return Allow
+	}
 	return Deny
 }
 

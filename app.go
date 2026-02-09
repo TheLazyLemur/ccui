@@ -12,8 +12,8 @@ import (
 
 	"ccui/automation"
 	"ccui/backend"
-	"ccui/backend/acp"
 	"ccui/backend/anthropic"
+	"ccui/backend/mcpclient"
 	"ccui/backend/tools"
 	"ccui/permission"
 
@@ -36,14 +36,6 @@ type SessionState struct {
 	EventChan chan backend.Event
 }
 
-// BackendType selects which agent backend to use
-type BackendType string
-
-const (
-	BackendACP       BackendType = "acp"
-	BackendAnthropic BackendType = "anthropic"
-)
-
 type App struct {
 	ctx             context.Context
 	mcpServer       *UserQuestionServer
@@ -54,10 +46,10 @@ type App struct {
 	ptyManager      *PTYManager
 
 	// backend infrastructure
-	backendType BackendType
 	backend     backend.AgentBackend // unified backend
 	permLayer   *permission.Layer
 	toolReg     *tools.Registry
+	mcpProvider *mcpclient.Provider // MCP tool provider
 
 	// automations
 	automationStore *automation.Store
@@ -67,24 +59,21 @@ type App struct {
 }
 
 func NewApp() *App {
-	// determine backend type from env (default: acp)
-	bt := BackendACP
-	if os.Getenv("CCUI_BACKEND") == "anthropic" {
-		bt = BackendAnthropic
-	}
 	return &App{
-		sessions:    make(map[string]*SessionState),
-		backendType: bt,
+		sessions: make(map[string]*SessionState),
 	}
 }
 
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
+
+	// Start MCP server for user questions
 	a.mcpServer = NewUserQuestionServer(ctx)
 	if url, err := a.mcpServer.Start(); err != nil {
 		slog.Error("failed to start MCP server", "error", err)
 	} else {
 		a.mcpServerURL = url
+		slog.Info("MCP server started", "url", url)
 	}
 
 	// init permission layer with wails emitter
@@ -99,18 +88,32 @@ func (a *App) startup(ctx context.Context) {
 	a.toolReg.Register(tools.NewWriteTool())
 	a.toolReg.Register(tools.NewEditTool())
 
+	// Initialize MCP client for user question server if available
+	if a.mcpServerURL != "" {
+		if err := a.initMCPProvider(ctx); err != nil {
+			slog.Error("failed to initialize MCP provider", "error", err)
+		}
+	}
+
 	apiKey := os.Getenv("ANTHROPIC_API_KEY")
-	if a.backendType == BackendAnthropic && apiKey != "" {
+	if apiKey != "" {
+		// Build list of tool providers
+		providers := []anthropic.ToolProvider{}
+		if a.mcpProvider != nil {
+			providers = append(providers, a.mcpProvider)
+			slog.Info("MCP provider registered", "tools", len(a.mcpProvider.GetTools()))
+		}
+
 		a.backend = anthropic.NewAnthropicBackend(anthropic.BackendConfig{
 			APIKey:    apiKey,
 			BaseURL:   os.Getenv("ANTHROPIC_BASE_URL"),
 			Executor:  a.toolReg,
 			PermLayer: a.permLayer,
+			Providers: providers,
 		})
 		slog.Info("anthropic backend initialized")
 	} else {
-		a.backend = acp.NewACPBackend(ctx, apiKey)
-		slog.Info("acp backend initialized")
+		slog.Error("ANTHROPIC_API_KEY not set, backend not initialized")
 	}
 
 	// init automation infrastructure
@@ -142,24 +145,40 @@ func (a *App) startup(ctx context.Context) {
 	a.StartTerminalListeners()
 }
 
+// initMCPProvider initializes the MCP client and provider for the user question server
+func (a *App) initMCPProvider(ctx context.Context) error {
+	mcpClient, err := mcpclient.NewSSEMCPClient(a.mcpServerURL)
+	if err != nil {
+		return fmt.Errorf("create MCP client: %w", err)
+	}
+
+	if err := mcpClient.Initialize(ctx); err != nil {
+		return fmt.Errorf("initialize MCP client: %w", err)
+	}
+
+	a.mcpProvider = mcpclient.NewProvider(mcpClient, "ccui")
+	slog.Info("MCP provider initialized", "url", a.mcpServerURL)
+	return nil
+}
+
 // backendFactory returns a function that creates backends for automation runs
 func (a *App) backendFactory(ctx context.Context) automation.BackendFactory {
 	return func(backendType string) (backend.AgentBackend, error) {
 		apiKey := os.Getenv("ANTHROPIC_API_KEY")
-		switch BackendType(backendType) {
-		case BackendAnthropic:
-			if apiKey == "" {
-				return nil, fmt.Errorf("ANTHROPIC_API_KEY required for anthropic backend")
-			}
-			return anthropic.NewAnthropicBackend(anthropic.BackendConfig{
-				APIKey:    apiKey,
-				BaseURL:   os.Getenv("ANTHROPIC_BASE_URL"),
-				Executor:  a.toolReg,
-				PermLayer: permission.NewLayer(permission.DefaultRules(), &noopEmitter{}),
-			}), nil
-		default:
-			return acp.NewACPBackend(ctx, apiKey), nil
+		if apiKey == "" {
+			return nil, fmt.Errorf("ANTHROPIC_API_KEY required for anthropic backend")
 		}
+
+		// Build list of tool providers (without MCP for automation - no user interaction)
+		providers := []anthropic.ToolProvider{}
+
+		return anthropic.NewAnthropicBackend(anthropic.BackendConfig{
+			APIKey:    apiKey,
+			BaseURL:   os.Getenv("ANTHROPIC_BASE_URL"),
+			Executor:  a.toolReg,
+			PermLayer: permission.NewLayer(permission.DefaultRules(), &noopEmitter{}),
+			Providers: providers,
+		}), nil
 	}
 }
 
@@ -323,7 +342,7 @@ func (a *App) handleSendMessage(data ...interface{}) {
 			return
 		}
 		eventPrefix := fmt.Sprintf("session:%s:", state.ID)
-		if err := state.Session.SendPrompt(input, []string{"mcp__ccui__ccui_ask_user_question"}); err != nil {
+		if err := state.Session.SendPrompt(input, []string{}); err != nil {
 			slog.Error("prompt failed", "error", err)
 			wailsRuntime.EventsEmit(a.ctx, eventPrefix+"error", err.Error())
 		}
@@ -332,13 +351,6 @@ func (a *App) handleSendMessage(data ...interface{}) {
 
 func (a *App) handlePermissionResponse(data ...interface{}) {
 	if optionID, ok := firstAs[string](data); ok {
-		// ACP backend permission response (type assert to access RespondToPermission)
-		if sess := a.getActiveSession(); sess != nil {
-			if client, ok := sess.(*acp.Client); ok {
-				client.RespondToPermission(optionID)
-				return
-			}
-		}
 		// Anthropic backend permission response
 		if a.permLayer != nil {
 			// extract toolCallId from data if present
@@ -381,6 +393,12 @@ func (a *App) shutdown(ctx context.Context) {
 	}
 	if a.mcpServer != nil {
 		a.mcpServer.Stop()
+	}
+	if a.mcpProvider != nil {
+		// Close the MCP client connection
+		if client := a.mcpProvider.GetClient(); client != nil {
+			client.Close()
+		}
 	}
 	if a.ptyManager != nil {
 		a.ptyManager.StopAll()

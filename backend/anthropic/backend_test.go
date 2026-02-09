@@ -691,6 +691,126 @@ data: {"type":"message_stop"}
 	}
 }
 
+// mockToolProvider for testing
+type mockToolProvider struct {
+	name  string
+	tools []Tool
+}
+
+func (m *mockToolProvider) Name() string { return m.name }
+func (m *mockToolProvider) GetTools() []Tool { return m.tools }
+func (m *mockToolProvider) Execute(ctx context.Context, name string, input map[string]any) (tools.ToolResult, error) {
+	return tools.ToolResult{Content: "mock result"}, nil
+}
+
+func TestFindProvider(t *testing.T) {
+	// given - backend with providers
+	registry := tools.NewRegistry()
+	cfg := BackendConfig{
+		APIKey:   "test-key",
+		Executor: registry,
+	}
+	b := NewAnthropicBackend(cfg)
+
+	// Add mock providers
+	ccuiProvider := &mockToolProvider{name: "ccui"}
+	otherProvider := &mockToolProvider{name: "other"}
+	b.providers = []ToolProvider{ccuiProvider, otherProvider}
+
+	// Test 1: Find ccui provider
+	p := b.findProvider("mcp__ccui__ask_user_question")
+	if p != ccuiProvider {
+		t.Error("expected to find ccui provider")
+	}
+
+	// Test 2: Find other provider
+	p = b.findProvider("mcp__other__some_tool")
+	if p != otherProvider {
+		t.Error("expected to find other provider")
+	}
+
+	// Test 3: Local tool returns nil
+	p = b.findProvider("Read")
+	if p != nil {
+		t.Error("expected nil for local tool")
+	}
+
+	// Test 4: Unknown MCP prefix returns nil
+	p = b.findProvider("mcp__unknown__tool")
+	if p != nil {
+		t.Error("expected nil for unknown provider")
+	}
+}
+
+func TestSplitToolName(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected []string
+	}{
+		{"mcp__ccui__ask_user_question", []string{"mcp", "ccui", "ask_user_question"}},
+		{"Read", []string{"Read"}},
+		{"mcp__server", []string{"mcp", "server"}},
+		{"a__b__c__d", []string{"a", "b", "c", "d"}},
+	}
+
+	for _, tt := range tests {
+		result := splitToolName(tt.input)
+		if len(result) != len(tt.expected) {
+			t.Errorf("splitToolName(%s): expected %v, got %v", tt.input, tt.expected, result)
+			continue
+		}
+		for i := range result {
+			if result[i] != tt.expected[i] {
+				t.Errorf("splitToolName(%s)[%d]: expected %s, got %s", tt.input, i, tt.expected[i], result[i])
+			}
+		}
+	}
+}
+
+func TestGetAllTools(t *testing.T) {
+	// given - backend with default tools and MCP providers
+	registry := tools.NewRegistry()
+	cfg := BackendConfig{
+		APIKey:   "test-key",
+		Executor: registry,
+	}
+	b := NewAnthropicBackend(cfg)
+
+	// Initially should have 6 default tools
+	tools := b.getAllTools()
+	if len(tools) != 6 {
+		t.Errorf("expected 6 default tools, got %d", len(tools))
+	}
+
+	// Add mock provider with MCP tools
+	mockProvider := &mockToolProvider{
+		name: "ccui",
+		tools: []Tool{
+			{Name: "mcp__ccui__ask_user_question"},
+			{Name: "mcp__ccui__other_tool"},
+		},
+	}
+	b.providers = []ToolProvider{mockProvider}
+
+	// Now should have 8 tools (6 default + 2 MCP)
+	tools = b.getAllTools()
+	if len(tools) != 8 {
+		t.Errorf("expected 8 tools (6 default + 2 MCP), got %d", len(tools))
+	}
+
+	// Verify MCP tools are included
+	hasAskTool := false
+	for _, tool := range tools {
+		if tool.Name == "mcp__ccui__ask_user_question" {
+			hasAskTool = true
+			break
+		}
+	}
+	if !hasAskTool {
+		t.Error("expected mcp__ccui__ask_user_question in tools")
+	}
+}
+
 func TestFileChangeTracking(t *testing.T) {
 	// given - SSE stream with Write tool
 	sseData := `event: message_start

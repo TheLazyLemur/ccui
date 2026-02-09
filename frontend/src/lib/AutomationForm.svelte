@@ -106,12 +106,12 @@
     </div>
 
     <label class="flex items-center gap-2 cursor-pointer">
-      <input type="checkbox" bind:checked={enabled} class="accent-ink" />
+      <input type="checkbox" bind:checked={enabled} class="check-ink" />
       <span class="text-sm text-ink">Enabled</span>
     </label>
 
     <label class="flex items-center gap-2 cursor-pointer">
-      <input type="checkbox" bind:checked={useWorktree} class="accent-ink" />
+      <input type="checkbox" bind:checked={useWorktree} class="check-ink" />
       <span class="text-sm text-ink">Use git worktree</span>
     </label>
     {#if useWorktree}
