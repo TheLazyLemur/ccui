@@ -10,6 +10,7 @@
   import ChatContent from './lib/ChatContent.svelte';
   import AutomationsPanel from './lib/AutomationsPanel.svelte';
   import { type Message, type ToolCall, type UserQuestion, type FileChange, type ReviewComment, type SessionMode, type PlanEntry, type SessionInfo, type SessionState } from './lib/shared';
+  import { handleVimKey } from './lib/vimNav';
   import { GetSessions, GetActiveSession, CreateSession, GetTriageItems } from '../wailsjs/go/main/App';
 
   // Multi-session state
@@ -38,6 +39,9 @@
   let showPalette = false;
   let paletteTarget: 'left' | 'right' = 'left';
   let focusedPanel: 'left' | 'right' = 'left';
+
+  let leftChatRef: ChatContent;
+  let rightChatRef: ChatContent;
 
   let fileChanges: FileChange[] = [];
   let reviewComments: ReviewComment[] = [];
@@ -171,6 +175,20 @@
       e.preventDefault();
       showPalette = false;
       return;
+    }
+
+    // Vim-style navigation (no modifier, not in input/terminal)
+    const tag = (document.activeElement?.tagName || '').toLowerCase();
+    if (tag !== 'textarea' && tag !== 'input' && !(e.metaKey || e.ctrlKey || e.altKey)) {
+      const panelType = focusedPanel === 'left' ? leftPanel : rightPanel;
+      const chatRef = focusedPanel === 'left' ? leftChatRef : rightChatRef;
+      const handled = handleVimKey(e, focusedPanel, panelType, {
+        setFocusedPanel: (p) => { focusedPanel = p; },
+        scrollChat: (dir) => chatRef?.scrollBy(dir === 'down' ? 100 : -100),
+        scrollChatToEdge: (edge) => chatRef?.scrollToEdge(edge),
+        focusInput: () => textarea?.focus(),
+      });
+      if (handled) { e.preventDefault(); return; }
     }
 
     if (!(e.metaKey || e.ctrlKey)) return;
@@ -362,6 +380,7 @@
           <div class="flex-1 overflow-hidden">
             {#if leftPanel === 'chat'}
               <ChatContent
+                bind:this={leftChatRef}
                 {messages}
                 {currentChunk}
                 {currentThought}
@@ -409,6 +428,7 @@
             <div class="flex-1 overflow-hidden">
               {#if rightPanel === 'chat'}
                 <ChatContent
+                  bind:this={rightChatRef}
                   {messages}
                   {currentChunk}
                   {currentThought}

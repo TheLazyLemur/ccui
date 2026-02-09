@@ -21,6 +21,15 @@
 
   let container: HTMLDivElement;
 
+  export function scrollBy(px: number) {
+    if (container) container.scrollBy({ top: px });
+  }
+
+  export function scrollToEdge(edge: 'top' | 'bottom') {
+    if (!container) return;
+    container.scrollTop = edge === 'top' ? 0 : container.scrollHeight;
+  }
+
   afterUpdate(() => {
     if (container) container.scrollTop = container.scrollHeight;
   });
