@@ -13,7 +13,6 @@ import (
 	"ccui/automation"
 	"ccui/backend"
 	"ccui/backend/anthropic"
-	"ccui/backend/mcpclient"
 	"ccui/backend/tools"
 	"ccui/permission"
 
@@ -36,20 +35,36 @@ type SessionState struct {
 	EventChan chan backend.Event
 }
 
+// UserQuestion is emitted to frontend
+type UserQuestion struct {
+	RequestID string   `json:"requestId"`
+	Question  string   `json:"question"`
+	Options   []Option `json:"options,omitempty"`
+}
+
+type Option struct {
+	Label       string `json:"label"`
+	Description string `json:"description,omitempty"`
+}
+
+// UserAnswer received from frontend
+type UserAnswer struct {
+	RequestID string `json:"requestId"`
+	Answer    string `json:"answer"`
+}
+
 type App struct {
 	ctx             context.Context
-	mcpServer       *UserQuestionServer
-	mcpServerURL    string
 	sessions        map[string]*SessionState
 	activeSessionID string
 	sessionMu       sync.RWMutex
 	ptyManager      *PTYManager
+	responseCh      chan UserAnswer // native AskUserQuestion channel
 
 	// backend infrastructure
-	backend     backend.AgentBackend // unified backend
-	permLayer   *permission.Layer
-	toolReg     *tools.Registry
-	mcpProvider *mcpclient.Provider // MCP tool provider
+	backend   backend.AgentBackend // unified backend
+	permLayer *permission.Layer
+	toolReg   *tools.Registry
 
 	// automations
 	automationStore *automation.Store
@@ -66,15 +81,7 @@ func NewApp() *App {
 
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
-
-	// Start MCP server for user questions
-	a.mcpServer = NewUserQuestionServer(ctx)
-	if url, err := a.mcpServer.Start(); err != nil {
-		slog.Error("failed to start MCP server", "error", err)
-	} else {
-		a.mcpServerURL = url
-		slog.Info("MCP server started", "url", url)
-	}
+	a.responseCh = make(chan UserAnswer, 1)
 
 	// init permission layer with wails emitter
 	a.permLayer = permission.NewLayer(permission.DefaultRules(), &wailsEmitter{ctx: ctx})
@@ -88,28 +95,13 @@ func (a *App) startup(ctx context.Context) {
 	a.toolReg.Register(tools.NewWriteTool())
 	a.toolReg.Register(tools.NewEditTool())
 
-	// Initialize MCP client for user question server if available
-	if a.mcpServerURL != "" {
-		if err := a.initMCPProvider(ctx); err != nil {
-			slog.Error("failed to initialize MCP provider", "error", err)
-		}
-	}
-
 	apiKey := os.Getenv("ANTHROPIC_API_KEY")
 	if apiKey != "" {
-		// Build list of tool providers
-		providers := []anthropic.ToolProvider{}
-		if a.mcpProvider != nil {
-			providers = append(providers, a.mcpProvider)
-			slog.Info("MCP provider registered", "tools", len(a.mcpProvider.GetTools()))
-		}
-
 		a.backend = anthropic.NewAnthropicBackend(anthropic.BackendConfig{
 			APIKey:    apiKey,
 			BaseURL:   os.Getenv("ANTHROPIC_BASE_URL"),
 			Executor:  a.toolReg,
 			PermLayer: a.permLayer,
-			Providers: providers,
 		})
 		slog.Info("anthropic backend initialized")
 	} else {
@@ -145,22 +137,6 @@ func (a *App) startup(ctx context.Context) {
 	a.StartTerminalListeners()
 }
 
-// initMCPProvider initializes the MCP client and provider for the user question server
-func (a *App) initMCPProvider(ctx context.Context) error {
-	mcpClient, err := mcpclient.NewSSEMCPClient(a.mcpServerURL)
-	if err != nil {
-		return fmt.Errorf("create MCP client: %w", err)
-	}
-
-	if err := mcpClient.Initialize(ctx); err != nil {
-		return fmt.Errorf("initialize MCP client: %w", err)
-	}
-
-	a.mcpProvider = mcpclient.NewProvider(mcpClient, "ccui")
-	slog.Info("MCP provider initialized", "url", a.mcpServerURL)
-	return nil
-}
-
 // backendFactory returns a function that creates backends for automation runs
 func (a *App) backendFactory(ctx context.Context) automation.BackendFactory {
 	return func(backendType string) (backend.AgentBackend, error) {
@@ -169,15 +145,11 @@ func (a *App) backendFactory(ctx context.Context) automation.BackendFactory {
 			return nil, fmt.Errorf("ANTHROPIC_API_KEY required for anthropic backend")
 		}
 
-		// Build list of tool providers (without MCP for automation - no user interaction)
-		providers := []anthropic.ToolProvider{}
-
 		return anthropic.NewAnthropicBackend(anthropic.BackendConfig{
 			APIKey:    apiKey,
 			BaseURL:   os.Getenv("ANTHROPIC_BASE_URL"),
 			Executor:  a.toolReg,
 			PermLayer: permission.NewLayer(permission.DefaultRules(), &noopEmitter{}),
-			Providers: providers,
 		}), nil
 	}
 }
@@ -201,9 +173,9 @@ func (a *App) CreateSession(name string) (string, error) {
 	eventChan := make(chan backend.Event, 100)
 
 	sess, err := a.backend.NewSession(a.ctx, backend.SessionOpts{
-		CWD:        cwd,
-		MCPServers: a.getMCPServers(),
-		EventChan:  eventChan,
+		CWD:       cwd,
+		EventChan: eventChan,
+		AskUser:   a.askUser,
 	})
 	if err != nil {
 		close(eventChan)
@@ -239,8 +211,12 @@ func (a *App) bridgeEvents(prefix string, eventChan <-chan backend.Event, chunkE
 			wailsRuntime.EventsEmit(a.ctx, prefix+"plan_update", event.Data)
 		case backend.EventPromptComplete:
 			wailsRuntime.EventsEmit(a.ctx, prefix+"prompt_complete", event.Data)
+		case backend.EventTokenUsage:
+			wailsRuntime.EventsEmit(a.ctx, prefix+"token_usage", event.Data)
 		case backend.EventFileChanges:
 			wailsRuntime.EventsEmit(a.ctx, prefix+"file_changes_updated", event.Data)
+		case backend.EventContextFull:
+			wailsRuntime.EventsEmit(a.ctx, prefix+"context_full", event.Data)
 		}
 	}
 }
@@ -323,11 +299,46 @@ func (a *App) getActiveState() *SessionState {
 	return a.sessions[a.activeSessionID]
 }
 
-func (a *App) getMCPServers() []any {
-	if a.mcpServerURL != "" {
-		return MCPServerConfig(a.mcpServerURL)
+// askUser is the native AskUserQuestion callback for interactive sessions.
+// Emits user_question event and blocks until frontend responds via user_answer.
+func (a *App) askUser(ctx context.Context, input map[string]any) (string, error) {
+	question, _ := input["question"].(string)
+	if question == "" {
+		return "", fmt.Errorf("question is required")
 	}
-	return []any{}
+
+	var options []Option
+	if opts, ok := input["options"].([]interface{}); ok {
+		for _, opt := range opts {
+			if optMap, ok := opt.(map[string]interface{}); ok {
+				o := Option{}
+				if l, ok := optMap["label"].(string); ok {
+					o.Label = l
+				}
+				if d, ok := optMap["description"].(string); ok {
+					o.Description = d
+				}
+				if o.Label != "" {
+					options = append(options, o)
+				}
+			}
+		}
+	}
+
+	requestID := fmt.Sprintf("uq-%d", time.Now().UnixNano())
+	wailsRuntime.EventsEmit(a.ctx, "user_question", UserQuestion{
+		RequestID: requestID,
+		Question:  question,
+		Options:   options,
+	})
+
+	// Block until user responds or context cancelled
+	select {
+	case answer := <-a.responseCh:
+		return answer.Answer, nil
+	case <-ctx.Done():
+		return "", ctx.Err()
+	}
 }
 
 func (a *App) handleSendMessage(data ...interface{}) {
@@ -367,11 +378,11 @@ func (a *App) handlePermissionResponse(data ...interface{}) {
 }
 
 func (a *App) handleUserAnswer(data ...interface{}) {
-	if a.mcpServer == nil {
-		return
-	}
 	if m, ok := firstAs[map[string]interface{}](data); ok {
-		a.mcpServer.HandleUserAnswer(UserAnswer{RequestID: mapStr(m, "requestId"), Answer: mapStr(m, "answer")})
+		select {
+		case a.responseCh <- UserAnswer{RequestID: mapStr(m, "requestId"), Answer: mapStr(m, "answer")}:
+		default:
+		}
 	}
 }
 
@@ -390,15 +401,6 @@ func (a *App) handleSubmitReview(data ...interface{}) {
 func (a *App) shutdown(ctx context.Context) {
 	if a.scheduler != nil {
 		a.scheduler.Stop()
-	}
-	if a.mcpServer != nil {
-		a.mcpServer.Stop()
-	}
-	if a.mcpProvider != nil {
-		// Close the MCP client connection
-		if client := a.mcpProvider.GetClient(); client != nil {
-			client.Close()
-		}
 	}
 	if a.ptyManager != nil {
 		a.ptyManager.StopAll()
@@ -461,7 +463,6 @@ func (a *App) SubmitReview(comments []ReviewComment) {
 		// Create review session with auto-permission and shared file store
 		reviewSession, err := a.backend.NewSession(a.ctx, backend.SessionOpts{
 			CWD:                cwd,
-			MCPServers:         []any{},
 			EventChan:          reviewEventChan,
 			AutoPermission:     true,
 			SuppressToolEvents: true,

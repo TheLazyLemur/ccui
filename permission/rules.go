@@ -64,7 +64,8 @@ func DefaultRules() *RuleSet {
 			"Glob":      Allow,
 			"Grep":      Allow,
 			"WebSearch": Allow,
-			"WebFetch":  Allow,
+			"WebFetch":          Allow,
+			"AskUserQuestion":   Allow,
 			// Write tools - ask
 			"Write":        Ask,
 			"Edit":         Ask,

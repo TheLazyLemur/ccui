@@ -12,6 +12,29 @@ func DefaultTools() []Tool {
 	}
 }
 
+// AskUserQuestionTool returns the tool definition for asking the user questions.
+// Not included in DefaultTools() — only added when session has an AskUser callback.
+func AskUserQuestionTool() Tool {
+	return Tool{
+		Name:        "AskUserQuestion",
+		Description: "Ask the user a question and wait for their response. Use when you need clarification or input.",
+		InputSchema: InputSchema{
+			Type: "object",
+			Properties: map[string]Property{
+				"question": {
+					Type:        "string",
+					Description: "The question to ask the user",
+				},
+				"options": {
+					Type:        "array",
+					Description: "Optional list of suggested options with label and description",
+				},
+			},
+			Required: []string{"question"},
+		},
+	}
+}
+
 func readTool() Tool {
 	return Tool{
 		Name:        "Read",

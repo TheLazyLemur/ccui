@@ -111,7 +111,6 @@ func (e *Engine) Execute(ctx context.Context, auto Automation) (*Run, error) {
 	eventChan := make(chan backend.Event, 100)
 	sess, err := be.NewSession(ctx, backend.SessionOpts{
 		CWD:            cwd,
-		MCPServers:     []any{},
 		EventChan:      eventChan,
 		AutoPermission: true,
 	})
