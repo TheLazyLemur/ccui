@@ -13,6 +13,7 @@ const (
 	EventPlanUpdate        EventType = "plan_update"
 	EventPermissionRequest EventType = "permission_request"
 	EventPromptComplete    EventType = "prompt_complete"
+	EventTokenUsage        EventType = "token_usage"
 	EventFileChanges       EventType = "file_changes"
 	EventContextFull       EventType = "context_full"
 )

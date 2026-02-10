@@ -141,10 +141,17 @@ func (s *AnthropicSession) SendPrompt(text string, allowedTools []string) error 
 		}
 
 		if stopReason != StopReasonToolUse {
-			// Done - emit prompt complete
+			// Done - emit prompt complete with token usage
+			s.mu.Lock()
+			tokens := s.inputTokens
+			s.mu.Unlock()
 			s.emit(backend.Event{
 				Type: backend.EventPromptComplete,
-				Data: map[string]any{"stopReason": stopReason},
+				Data: map[string]any{
+					"stopReason":  stopReason,
+					"inputTokens": tokens,
+					"limit":       maxContextTokens,
+				},
 			})
 			return nil
 		}
@@ -236,6 +243,10 @@ func (s *AnthropicSession) processStream(body io.ReadCloser) (string, error) {
 				s.mu.Lock()
 				s.inputTokens = ev.MessageStart.Message.Usage.InputTokens
 				s.mu.Unlock()
+				s.emit(backend.Event{
+					Type: backend.EventTokenUsage,
+					Data: map[string]any{"inputTokens": ev.MessageStart.Message.Usage.InputTokens, "limit": maxContextTokens},
+				})
 			}
 
 		case EventContentBlockStart:

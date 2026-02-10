@@ -25,6 +25,8 @@
   let inputText = '';
   let textarea: HTMLTextAreaElement;
   let isLoading = false;
+  let contextFull = false;
+  let tokenUsage: { inputTokens: number; limit: number } | null = null;
   let currentChunk = '';
   let currentThought = '';
   let userQuestion: UserQuestion | null = null;
@@ -69,7 +71,9 @@
         availableModes: [],
         isLoading: false,
         reviewAgentOutput: '',
-        reviewAgentRunning: false
+        reviewAgentRunning: false,
+        contextFull: false,
+        tokenUsage: null
       });
     }
     return sessionStates.get(id)!;
@@ -78,12 +82,12 @@
   function saveCurrentSessionState() {
     if (!activeSessionId) return;
     const state = getOrCreateSessionState(activeSessionId);
-    Object.assign(state, { messages, fileChanges, reviewComments, planEntries, currentModeId, currentChunk, currentThought, availableModes, isLoading, reviewAgentOutput, reviewAgentRunning });
+    Object.assign(state, { messages, fileChanges, reviewComments, planEntries, currentModeId, currentChunk, currentThought, availableModes, isLoading, reviewAgentOutput, reviewAgentRunning, contextFull, tokenUsage });
   }
 
   function loadSessionState(id: string) {
     const state = getOrCreateSessionState(id);
-    ({ messages, fileChanges, reviewComments, planEntries, currentModeId, currentChunk, currentThought, availableModes, isLoading, reviewAgentOutput, reviewAgentRunning } = state);
+    ({ messages, fileChanges, reviewComments, planEntries, currentModeId, currentChunk, currentThought, availableModes, isLoading, reviewAgentOutput, reviewAgentRunning, contextFull, tokenUsage } = state);
   }
 
   function subscribeToSession(sessionId: string) {
@@ -115,7 +119,7 @@
       }
       syncIfActive();
     });
-    on('prompt_complete', () => {
+    on('prompt_complete', (data?: { inputTokens?: number; limit?: number }) => {
       if (state.currentChunk) {
         const newId = state.messages.length > 0 ? Math.max(...state.messages.map(m => m.id)) + 1 : 1;
         state.messages.push({ id: newId, text: state.currentChunk, sender: 'bot' });
@@ -123,6 +127,9 @@
       }
       state.currentThought = '';
       state.isLoading = false;
+      if (data?.inputTokens != null && data?.limit != null) {
+        state.tokenUsage = { inputTokens: data.inputTokens, limit: data.limit };
+      }
       syncIfActive();
     });
     on('error', (err: string) => {
@@ -131,6 +138,7 @@
       state.isLoading = false;
       syncIfActive();
     });
+    on('token_usage', (data: { inputTokens: number; limit: number }) => { state.tokenUsage = data; syncIfActive(); });
     on('file_changes_updated', (changes: FileChange[]) => { state.fileChanges = changes; syncIfActive(); });
     on('review_agent_chunk', (t: string) => { state.reviewAgentOutput += t; syncIfActive(); });
     on('review_agent_running', () => { state.reviewAgentRunning = true; state.reviewAgentOutput = ''; syncIfActive(); });
@@ -138,6 +146,7 @@
     on('modes_available', (modes: SessionMode[]) => { state.availableModes = modes; syncIfActive(); });
     on('mode_changed', (modeId: string) => { state.currentModeId = modeId; syncIfActive(); });
     on('plan_update', (entries: PlanEntry[]) => { state.planEntries = entries; syncIfActive(); });
+    on('context_full', () => { state.contextFull = true; state.isLoading = false; syncIfActive(); });
   }
 
   function handleSessionChange(newSessionId: string) {
@@ -282,7 +291,7 @@
 
   function sendMessage() {
     const text = inputText.trim();
-    if (!text || isLoading || !activeSessionId) return;
+    if (!text || isLoading || contextFull || !activeSessionId) return;
     const state = getOrCreateSessionState(activeSessionId);
     if (state.currentChunk) {
       const newId = state.messages.length > 0 ? Math.max(...state.messages.map(m => m.id)) + 1 : 1;
@@ -392,13 +401,21 @@
                   />
                 </div>
                 {#if focusedPanel === 'left' || rightPanel !== 'chat'}
+                  {#if contextFull}
+                    <div class="px-4 py-2 text-sm text-accent-danger border-b border-ink-faint">Context window full — start a new session to continue</div>
+                  {/if}
                   <div class="px-4 py-3 border-t border-ink-faint">
                     <div class="flex gap-3 items-end">
-                      <textarea bind:this={textarea} bind:value={inputText} on:keydown={handleKeydown} on:input={autoResize} placeholder="Write a message..." rows="1" disabled={isLoading} class="flex-1 px-4 py-3 bg-paper border border-ink-faint text-ink text-[15px] placeholder-ink-muted resize-none leading-normal focus:outline-none focus:border-ink-muted transition-colors disabled:opacity-50"></textarea>
-                      <button on:click={sendMessage} disabled={isLoading} class="px-5 py-3 bg-ink text-paper text-sm hover:bg-ink-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
+                      <textarea bind:this={textarea} bind:value={inputText} on:keydown={handleKeydown} on:input={autoResize} placeholder={contextFull ? 'Session context full — start a new session' : 'Write a message...'} rows="1" disabled={isLoading || contextFull} class="flex-1 px-4 py-3 bg-paper border border-ink-faint text-ink text-[15px] placeholder-ink-muted resize-none leading-normal focus:outline-none focus:border-ink-muted transition-colors disabled:opacity-50"></textarea>
+                      <button on:click={sendMessage} disabled={isLoading || contextFull} class="px-5 py-3 bg-ink text-paper text-sm hover:bg-ink-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
                         {#if isLoading}<span class="inline-block animate-spin-slow">◎</span>{:else}Send{/if}
                       </button>
                     </div>
+                    {#if tokenUsage}
+                      <div class="text-xs mt-1.5 {tokenUsage.inputTokens / tokenUsage.limit > 0.9 ? 'text-accent-danger' : tokenUsage.inputTokens / tokenUsage.limit > 0.75 ? 'text-accent-warning' : 'text-ink-muted'}">
+                        {Math.round(tokenUsage.inputTokens / 1000)}k / {Math.round(tokenUsage.limit / 1000)}k tokens
+                      </div>
+                    {/if}
                   </div>
                 {/if}
               </div>
@@ -454,13 +471,21 @@
                     />
                   </div>
                   {#if focusedPanel === 'right' || leftPanel !== 'chat'}
+                    {#if contextFull}
+                      <div class="px-4 py-2 text-sm text-accent-danger border-b border-ink-faint">Context window full — start a new session to continue</div>
+                    {/if}
                     <div class="px-4 py-3 border-t border-ink-faint">
                       <div class="flex gap-3 items-end">
-                        <textarea bind:this={textarea} bind:value={inputText} on:keydown={handleKeydown} on:input={autoResize} placeholder="Write a message..." rows="1" disabled={isLoading} class="flex-1 px-4 py-3 bg-paper border border-ink-faint text-ink text-[15px] placeholder-ink-muted resize-none leading-normal focus:outline-none focus:border-ink-muted transition-colors disabled:opacity-50"></textarea>
-                        <button on:click={sendMessage} disabled={isLoading} class="px-5 py-3 bg-ink text-paper text-sm hover:bg-ink-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
+                        <textarea bind:this={textarea} bind:value={inputText} on:keydown={handleKeydown} on:input={autoResize} placeholder={contextFull ? 'Session context full — start a new session' : 'Write a message...'} rows="1" disabled={isLoading || contextFull} class="flex-1 px-4 py-3 bg-paper border border-ink-faint text-ink text-[15px] placeholder-ink-muted resize-none leading-normal focus:outline-none focus:border-ink-muted transition-colors disabled:opacity-50"></textarea>
+                        <button on:click={sendMessage} disabled={isLoading || contextFull} class="px-5 py-3 bg-ink text-paper text-sm hover:bg-ink-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
                           {#if isLoading}<span class="inline-block animate-spin-slow">◎</span>{:else}Send{/if}
                         </button>
                       </div>
+                      {#if tokenUsage}
+                        <div class="text-xs mt-1.5 {tokenUsage.inputTokens / tokenUsage.limit > 0.9 ? 'text-accent-danger' : tokenUsage.inputTokens / tokenUsage.limit > 0.75 ? 'text-accent-warning' : 'text-ink-muted'}">
+                          {Math.round(tokenUsage.inputTokens / 1000)}k / {Math.round(tokenUsage.limit / 1000)}k tokens
+                        </div>
+                      {/if}
                     </div>
                   {/if}
                 </div>

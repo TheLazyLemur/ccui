@@ -1043,6 +1043,79 @@ data: {"type":"message_stop"}
 	}
 }
 
+func TestPromptComplete_IncludesTokenUsage(t *testing.T) {
+	// given - mock server returning text response with input_tokens
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher := w.(http.Flusher)
+		events := []string{
+			"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_tok\",\"role\":\"assistant\",\"content\":[],\"usage\":{\"input_tokens\":4200,\"output_tokens\":0}}}\n\n",
+			"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+			"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n",
+			"event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+			"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n",
+			"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+		}
+		for _, ev := range events {
+			fmt.Fprint(w, ev)
+			flusher.Flush()
+		}
+	}))
+	defer server.Close()
+
+	emitter := &mockEmitter{}
+	permLayer := permission.NewLayer(permission.DefaultRules(), emitter)
+	b := NewAnthropicBackend(BackendConfig{
+		APIKey:    "test-key",
+		BaseURL:   server.URL,
+		Executor:  tools.NewRegistry(),
+		PermLayer: permLayer,
+	})
+
+	eventChan := make(chan backend.Event, 100)
+	sess, err := b.NewSession(context.Background(), backend.SessionOpts{EventChan: eventChan})
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+
+	// when
+	err = sess.SendPrompt("hello", nil)
+	if err != nil {
+		t.Fatalf("SendPrompt: %v", err)
+	}
+
+	// then - EventPromptComplete should contain inputTokens and limit
+	close(eventChan)
+	var found bool
+	for ev := range eventChan {
+		if ev.Type != backend.EventPromptComplete {
+			continue
+		}
+		found = true
+		data, ok := ev.Data.(map[string]any)
+		if !ok {
+			t.Fatalf("expected map[string]any, got %T", ev.Data)
+		}
+		inputTokens, ok := data["inputTokens"]
+		if !ok {
+			t.Error("missing inputTokens in EventPromptComplete data")
+		}
+		if inputTokens != 4200 {
+			t.Errorf("expected inputTokens=4200, got %v", inputTokens)
+		}
+		limit, ok := data["limit"]
+		if !ok {
+			t.Error("missing limit in EventPromptComplete data")
+		}
+		if limit != maxContextTokens {
+			t.Errorf("expected limit=%d, got %v", maxContextTokens, limit)
+		}
+	}
+	if !found {
+		t.Error("expected EventPromptComplete event, got none")
+	}
+}
+
 func TestAskUserQuestion_Execution(t *testing.T) {
 	// given - session with AskUser that returns a fixed answer
 	emitter := &mockEmitter{}

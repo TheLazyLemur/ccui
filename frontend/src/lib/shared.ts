@@ -74,6 +74,8 @@ export interface SessionState {
   isLoading: boolean;
   reviewAgentOutput: string;
   reviewAgentRunning: boolean;
+  contextFull: boolean;
+  tokenUsage: { inputTokens: number; limit: number } | null;
 }
 
 export interface PlanEntry {
