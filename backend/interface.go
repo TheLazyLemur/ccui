@@ -14,6 +14,7 @@ const (
 	EventPermissionRequest EventType = "permission_request"
 	EventPromptComplete    EventType = "prompt_complete"
 	EventFileChanges       EventType = "file_changes"
+	EventContextFull       EventType = "context_full"
 )
 
 // Event from the backend
@@ -24,9 +25,12 @@ type Event struct {
 
 // SessionOpts for creating sessions
 type SessionOpts struct {
-	CWD        string
-	MCPServers []any
-	EventChan  chan<- Event // where to send events
+	CWD       string
+	EventChan chan<- Event // where to send events
+
+	// AskUser callback for interactive sessions. Nil = tool not available.
+	// Returns the user's answer string, or error if cancelled.
+	AskUser func(ctx context.Context, input map[string]any) (string, error)
 
 	// Review-mode configuration
 	AutoPermission     bool             // auto-approve all permissions

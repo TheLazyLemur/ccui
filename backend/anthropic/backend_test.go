@@ -881,3 +881,205 @@ data: {"type":"message_stop"}
 		t.Error("expected error for denied tool")
 	}
 }
+
+func TestAskUserQuestion_IncludedWhenSet(t *testing.T) {
+	// given - session with AskUser callback
+	emitter := &mockEmitter{}
+	permLayer := permission.NewLayer(permission.DefaultRules(), emitter)
+	registry := tools.NewRegistry()
+	b := NewAnthropicBackend(BackendConfig{
+		APIKey:    "test-key",
+		Executor:  registry,
+		PermLayer: permLayer,
+	})
+
+	askUser := func(ctx context.Context, input map[string]any) (string, error) {
+		return "user answer", nil
+	}
+
+	eventChan := make(chan backend.Event, 10)
+	sess, err := b.NewSession(context.Background(), backend.SessionOpts{
+		EventChan: eventChan,
+		AskUser:   askUser,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// when - build tool list same way SendPrompt does
+	as := sess.(*AnthropicSession)
+	allTools := b.getAllTools()
+	if as.askUser != nil {
+		allTools = append(allTools, AskUserQuestionTool())
+	}
+
+	// then - should include AskUserQuestion
+	found := false
+	for _, tool := range allTools {
+		if tool.Name == "AskUserQuestion" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected AskUserQuestion in tool list when AskUser is set")
+	}
+}
+
+func TestAskUserQuestion_ExcludedWhenNil(t *testing.T) {
+	// given - session without AskUser callback
+	emitter := &mockEmitter{}
+	permLayer := permission.NewLayer(permission.DefaultRules(), emitter)
+	registry := tools.NewRegistry()
+	b := NewAnthropicBackend(BackendConfig{
+		APIKey:    "test-key",
+		Executor:  registry,
+		PermLayer: permLayer,
+	})
+
+	eventChan := make(chan backend.Event, 10)
+	sess, err := b.NewSession(context.Background(), backend.SessionOpts{
+		EventChan: eventChan,
+		// AskUser not set
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// when
+	as := sess.(*AnthropicSession)
+	allTools := b.getAllTools()
+	if as.askUser != nil {
+		allTools = append(allTools, AskUserQuestionTool())
+	}
+
+	// then - should NOT include AskUserQuestion
+	for _, tool := range allTools {
+		if tool.Name == "AskUserQuestion" {
+			t.Error("AskUserQuestion should not be in tool list when AskUser is nil")
+		}
+	}
+}
+
+func TestContextFull_BlocksSendPrompt(t *testing.T) {
+	// given - session with inputTokens over limit from a prior message_start
+	sseData := `event: message_start
+data: {"type":"message_start","message":{"id":"msg_big","role":"assistant","content":[],"usage":{"input_tokens":200001,"output_tokens":0}}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}
+
+event: message_stop
+data: {"type":"message_stop"}
+
+`
+
+	emitter := &mockEmitter{}
+	permLayer := permission.NewLayer(permission.DefaultRules(), emitter)
+	registry := tools.NewRegistry()
+
+	eventChan := make(chan backend.Event, 100)
+	session := &AnthropicSession{
+		id:          "test-session",
+		ctx:         context.Background(),
+		cancel:      func() {},
+		backend:     &AnthropicBackend{executor: registry, permLayer: permLayer},
+		opts:        backend.SessionOpts{EventChan: eventChan},
+		history:     make([]Message, 0),
+		toolManager: backend.NewToolCallManager(),
+		fileStore:   backend.NewFileChangeStore(),
+	}
+
+	// when - process stream that sets inputTokens above limit
+	_, err := session.processStream(io.NopCloser(strings.NewReader(sseData)))
+	if err != nil {
+		t.Fatalf("processStream error: %v", err)
+	}
+
+	// then - inputTokens should be captured
+	if session.inputTokens != 200001 {
+		t.Fatalf("expected inputTokens 200001, got %d", session.inputTokens)
+	}
+
+	// when - next SendPrompt should be refused
+	err = session.SendPrompt("hello", nil)
+
+	// then
+	if err == nil {
+		t.Fatal("expected context full error, got nil")
+	}
+	if !strings.Contains(err.Error(), "context full") {
+		t.Fatalf("expected 'context full' in error, got: %v", err)
+	}
+
+	// history should NOT have the refused message appended
+	for _, msg := range session.history {
+		for _, block := range msg.Content {
+			if block.Text == "hello" {
+				t.Error("refused message should not be in history")
+			}
+		}
+	}
+
+	// should have emitted EventContextFull
+	close(eventChan)
+	var gotContextFull bool
+	for ev := range eventChan {
+		if ev.Type == backend.EventContextFull {
+			gotContextFull = true
+		}
+	}
+	if !gotContextFull {
+		t.Error("expected EventContextFull event")
+	}
+}
+
+func TestAskUserQuestion_Execution(t *testing.T) {
+	// given - session with AskUser that returns a fixed answer
+	emitter := &mockEmitter{}
+	permLayer := permission.NewLayer(permission.DefaultRules(), emitter)
+	registry := tools.NewRegistry()
+
+	askUser := func(ctx context.Context, input map[string]any) (string, error) {
+		q, _ := input["question"].(string)
+		return "answer to: " + q, nil
+	}
+
+	eventChan := make(chan backend.Event, 100)
+	session := &AnthropicSession{
+		id:          "test-session",
+		ctx:         context.Background(),
+		cancel:      func() {},
+		backend:     &AnthropicBackend{executor: registry, permLayer: permLayer},
+		opts:        backend.SessionOpts{EventChan: eventChan},
+		history:     make([]Message, 0),
+		toolManager: backend.NewToolCallManager(),
+		fileStore:   backend.NewFileChangeStore(),
+		askUser:     askUser,
+	}
+
+	// when
+	result, err := session.executeWithProvider("AskUserQuestion", map[string]any{
+		"question": "what color?",
+	})
+
+	// then
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Content != "answer to: what color?" {
+		t.Errorf("expected 'answer to: what color?', got %q", result.Content)
+	}
+	if result.IsError {
+		t.Error("expected no error")
+	}
+}

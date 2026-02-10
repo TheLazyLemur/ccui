@@ -17,6 +17,8 @@ import (
 	"github.com/google/uuid"
 )
 
+const maxContextTokens = 200_000
+
 // AnthropicSession implements backend.Session for direct API calls
 type AnthropicSession struct {
 	id          string
@@ -27,7 +29,11 @@ type AnthropicSession struct {
 	history     []Message
 	toolManager *backend.ToolCallManager
 	fileStore   *backend.FileChangeStore
+	inputTokens int
 	mu          sync.Mutex
+
+	// AskUser callback, nil when not available (automation/review sessions)
+	askUser func(ctx context.Context, input map[string]any) (string, error)
 
 	// Review-mode configuration
 	autoPermission     bool
@@ -51,6 +57,7 @@ func newAnthropicSession(ctx context.Context, b *AnthropicBackend, opts backend.
 		history:            make([]Message, 0),
 		toolManager:        backend.NewToolCallManager(),
 		fileStore:          fileStore,
+		askUser:            opts.AskUser,
 		autoPermission:     opts.AutoPermission,
 		suppressToolEvents: opts.SuppressToolEvents,
 	}
@@ -94,6 +101,18 @@ func (s *AnthropicSession) Close() error {
 
 // SendPrompt sends a prompt to the Anthropic API
 func (s *AnthropicSession) SendPrompt(text string, allowedTools []string) error {
+	// Check token limit before adding message
+	s.mu.Lock()
+	tokens := s.inputTokens
+	s.mu.Unlock()
+	if tokens >= maxContextTokens {
+		s.emit(backend.Event{
+			Type: backend.EventContextFull,
+			Data: map[string]any{"inputTokens": s.inputTokens, "limit": maxContextTokens},
+		})
+		return fmt.Errorf("context full: %d input tokens exceeds limit of %d", s.inputTokens, maxContextTokens)
+	}
+
 	s.mu.Lock()
 	// Add user message to history
 	s.history = append(s.history, Message{
@@ -102,8 +121,11 @@ func (s *AnthropicSession) SendPrompt(text string, allowedTools []string) error 
 	})
 	s.mu.Unlock()
 
-	// Get all tools (local + MCP providers)
+	// Get all tools (local + MCP providers + conditional AskUserQuestion)
 	allTools := s.backend.getAllTools()
+	if s.askUser != nil {
+		allTools = append(allTools, AskUserQuestionTool())
+	}
 
 	// Tool loop
 	for {
@@ -126,7 +148,18 @@ func (s *AnthropicSession) SendPrompt(text string, allowedTools []string) error 
 			})
 			return nil
 		}
-		// Continue loop for tool execution
+
+		// Check token limit before continuing tool loop
+		s.mu.Lock()
+		tokens := s.inputTokens
+		s.mu.Unlock()
+		if tokens >= maxContextTokens {
+			s.emit(backend.Event{
+				Type: backend.EventContextFull,
+				Data: map[string]any{"inputTokens": s.inputTokens, "limit": maxContextTokens},
+			})
+			return fmt.Errorf("context full: %d input tokens exceeds limit of %d", s.inputTokens, maxContextTokens)
+		}
 	}
 }
 
@@ -198,6 +231,13 @@ func (s *AnthropicSession) processStream(body io.ReadCloser) (string, error) {
 		}
 
 		switch ev.Type {
+		case EventMessageStart:
+			if ev.MessageStart != nil {
+				s.mu.Lock()
+				s.inputTokens = ev.MessageStart.Message.Usage.InputTokens
+				s.mu.Unlock()
+			}
+
 		case EventContentBlockStart:
 			if ev.ContentBlockStart == nil {
 				continue
@@ -484,6 +524,15 @@ func (s *AnthropicSession) emitToolState(state *backend.ToolState) {
 
 // executeWithProvider executes a tool using the appropriate provider (local or MCP)
 func (s *AnthropicSession) executeWithProvider(name string, input map[string]any) (tools.ToolResult, error) {
+	// Native AskUserQuestion — direct function call, no MCP roundtrip
+	if name == "AskUserQuestion" && s.askUser != nil {
+		answer, err := s.askUser(s.ctx, input)
+		if err != nil {
+			return tools.ToolResult{Content: err.Error(), IsError: true}, nil
+		}
+		return tools.ToolResult{Content: answer}, nil
+	}
+
 	// Check if this is an MCP tool
 	if provider := s.backend.findProvider(name); provider != nil {
 		return provider.Execute(s.ctx, name, input)
